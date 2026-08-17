@@ -1,0 +1,2709 @@
+<!DOCTYPE html>
+<!--
+  HOOKPUNKS — PROTOTYPE BUILD 0.5
+  ================================
+  0.4 rebuilt movement on a velocity vector and introduced the surface
+  registry. 0.5 finishes the port from 0.3 and builds out the trick and
+  structure systems on top of it.
+
+  --- carried forward from 0.4 -------------------------------------------
+  SURFACE REGISTRY   ground is a set of queryable surfaces (road corridor,
+                     static solids, car roofs). sampleGround() returns the
+                     highest surface underfoot.
+  VELOCITY PHYSICS   speed is a vector. Gravity resolves along the slope;
+                     leaving the ground is just the surface no longer
+                     catching you.
+  ROPE AS CONSTRAINT inextensible, pull-only, on the physics body. Slingshot
+                     is emergent. Wrap-point list walks car hulls corner to
+                     corner, including consecutive corners of one car.
+  GRAZE CONTACT      approach angle judged in the car's frame; shallow keeps
+                     momentum and sparks, steep scrubs absolute speed. The
+                     tow car's rear panel can only ever bump.
+  HITCH MODE         eligibility is proximity + relative speed, independent of
+                     the harpoon. Ride the car's perimeter by arc length.
+  OVERPASSES         crossings spanning above the highway; decks registered as
+                     skateable surfaces.
+  STATIC GRAPPLE     the anchor is a descriptor, not a car. A fixed point
+                     overhead makes the same constraint a pendulum.
+
+  --- new in 0.5 ----------------------------------------------------------
+  GRIND RAILS        a rail is a 1D constraint, not a surface — the registry
+                     answers "what is underfoot", which would leave you free
+                     to fall off a 0.28-wide bar. Built as a mode, like hitch.
+                     Approach angle picks 50-50, fakie 50-50 or boardslide;
+                     the stance rides on player yaw, not board.rotation.y,
+                     which belongs to the spin tricks.
+  TRICKS             R, with the trick chosen by how you got airborne:
+                     kickflip / hardflip off a roof bounce / pop shove-it off
+                     a rail / darkside while grinding.
+  AIR ROTATION       W/S flip the body, A/D spin it, combined for McTwists.
+                     Landing is judged for upright or you bail. The altitude
+                     gate is derived from ollie^2/(2g) so it tracks retuning.
+  CAMERA YAW         the rig follows travel direction, not body yaw, so a 540
+                     no longer whips the view round. C turns the rider back
+                     square without touching the board or any momentum.
+  TAIL DRAG          SHIFT while towed strafes across behind the car; SHIFT
+                     free-skating breaks traction for a drift; S braking gets
+                     the same pose and sparks.
+  SPEED FEEL         streaks reinstated with per-streak anchoring (path when
+                     on the corridor, velocity otherwise), camera-proximity
+                     fade and depth testing. Zoom, FOV and shake each on their
+                     own speed ramp; follow lag compensated in discrete form.
+  OPENING            starts already hitched to a moving car. The world holds
+                     still behind the start screen. Debug menu on ` , closed
+                     by default.
+
+  --- known gaps ----------------------------------------------------------
+  Static solids have no lateral collision, which is why overpass pillars sit
+  outside the carriageway. No launch geometry on the road: reaching a deck
+  means a mega-vert or a harpoon swing. Mobile input adapter not yet ported.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>HOOKPUNKS — Prototype Build 0.5</title>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#05030a; font-family:'Courier New', monospace; }
+  canvas { display:block; }
+  #hud { position:fixed; inset:0; pointer-events:none; color:#eafcff; z-index:10; }
+  .panel { position:absolute; background:rgba(8,4,18,0.74); padding:10px 14px; font-size:11px; line-height:1.55; }
+  #diag { top:12px; left:12px; border:1px solid #00ffe144; border-left:3px solid #00ffe1; min-width:224px; }
+  #tune { top:12px; right:12px; border:1px solid #ff2fd044; border-right:3px solid #ff2fd0;
+          min-width:216px; max-height:calc(100vh - 24px); overflow-y:auto;
+          pointer-events:auto; scrollbar-width:thin; scrollbar-color:#ff2fd066 transparent; }
+  #tune::-webkit-scrollbar { width:6px; }
+  #tune::-webkit-scrollbar-thumb { background:#ff2fd066; }
+  #tune::-webkit-scrollbar-track { background:transparent; }
+  #tune h3 { position:sticky; top:0; background:rgba(8,4,18,0.95); margin:0 0 6px; padding:2px 0; z-index:2; }
+  .tgrp { font-size:8.5px; letter-spacing:2.5px; color:#ff2fd0aa; margin:8px 0 3px;
+          border-top:1px solid #ff2fd022; padding-top:5px; }
+  .tgrp:first-child { margin-top:0; border-top:none; padding-top:0; }
+  .panel h3 { margin:0 0 6px; font-size:9px; letter-spacing:3px; color:#00ffe1; font-weight:normal; }
+  #tune h3 { color:#ff2fd0; }
+  .row { display:flex; justify-content:space-between; gap:14px; }
+  .k { color:#63788f; } .v { color:#eafcff; }
+  .v.good { color:#00ffe1; } .v.warn { color:#ffe14d; } .v.bad { color:#ff3f6f; }
+  .sep { height:1px; background:#ffffff12; margin:6px 0; }
+  #tune .row.sel .k, #tune .row.sel .v { color:#ff2fd0; }
+  #tune .row.sel::before { content:'▸'; position:absolute; margin-left:-10px; color:#ff2fd0; }
+  #tune .hint { margin-top:7px; font-size:9.5px; color:#556; line-height:1.45; }
+  #heatWrap { margin-top:6px; }
+  #heatTrack { height:7px; background:#1a0f24; border:1px solid #ffffff18; position:relative; }
+  #heatFill { position:absolute; inset:0 auto 0 0; width:0%; background:#ffe14d; transition:background .12s; }
+  #matchTrack { height:5px; background:#1a0f24; border:1px solid #ffffff18; position:relative; margin-top:4px; }
+  #matchFill { position:absolute; top:0; bottom:0; left:0; width:0%; background:#ff3f6f; transition:background .12s; }
+  #hitchCue { position:absolute; top:62%; left:50%; transform:translateX(-50%);
+              font-size:12px; letter-spacing:3px; color:#00ffe1; text-shadow:0 0 12px #00ffe1;
+              opacity:0; transition:opacity .18s; }
+  #hitchCue.show { opacity:1; }
+  #keys { position:absolute; bottom:12px; left:12px; background:rgba(8,4,18,0.74);
+          border:1px solid #ff2fd033; padding:10px 14px; font-size:10.5px; line-height:1.8; color:#8fa3b8; }
+  #keys b { color:#ff2fd0; } #keys .off { color:#44525f; } #keys .on { color:#00ffe1; }
+  #speed { position:absolute; bottom:12px; right:12px; text-align:right;
+           font-size:34px; font-weight:bold; color:#ff2fd0; text-shadow:0 0 12px #ff2fd0; }
+  #speed small { display:block; font-size:9px; letter-spacing:3px; color:#5df; }
+  #banner { position:absolute; top:28%; left:50%; transform:translate(-50%,-50%);
+            font-size:20px; color:#ffe14d; text-shadow:0 0 18px #ffe14d; letter-spacing:3px;
+            opacity:0; transition:opacity .2s; white-space:nowrap; }
+  #banner.show { opacity:1; }
+  #crosshair { position:absolute; width:14px; height:14px; margin:-7px 0 0 -7px;
+               border:2px solid #5cffe6aa; border-radius:50%; left:50%; top:50%;
+               transition:border-color .1s, background .1s, transform .1s, opacity .15s; }
+  #crosshair.lock { border-color:#ff2fd0; background:#ff2fd033; transform:scale(1.6); }
+  #crosshair.hidden { opacity:0; }
+  #start { position:fixed; inset:0; background:#05030a; z-index:100; display:flex;
+           flex-direction:column; align-items:center; justify-content:center; text-align:center;
+           color:#eafcff; padding:20px; }
+  #start h1 { color:#00ffe1; font-size:27px; letter-spacing:7px; margin:0; text-shadow:0 0 18px #00ffe1aa; }
+  #start h2 { color:#ff2fd0; font-size:10px; letter-spacing:5px; font-weight:normal; margin:8px 0 0; }
+  #start p { max-width:580px; font-size:12.5px; line-height:1.8; color:#8fa3b8; margin-top:20px; }
+  #start ul { text-align:left; font-size:11.5px; line-height:1.9; color:#8fa3b8; margin-top:2px; max-width:580px; }
+  #start li b { color:#00ffe1; font-weight:normal; }
+  #start button { margin-top:24px; padding:12px 38px; background:transparent; border:2px solid #00ffe1;
+                  color:#00ffe1; font-family:inherit; font-size:13px; letter-spacing:4px; cursor:pointer; }
+  #start button:hover { background:#00ffe122; }
+</style>
+</head>
+<body>
+
+<div id="start">
+  <h1>HOOKPUNKS</h1>
+  <h2>PROTOTYPE BUILD 0.5 — SOLAR CITY ONE</h2>
+  <p>You're a courier, and you're already on the job — holding the back of a car doing eighty down the highway. Slide around it, let go when you like, and take the road from there.</p>
+  <ul>
+    <li><b>SHIFT</b> unattached breaks traction for a drift — the board swings ahead of your line for a tighter corner at speed</li>
+    <li>On a big air, <b>W/S</b> flip the body and <b>A/D</b> spin it — combine them for McTwists. Flips need more than an ollie's worth of clearance, so a flat pop won't do. Land upright or you bail</li>
+    <li>The camera holds its line while you spin, so you can land backwards — <b>C</b> turns the rider round with the board and your speed untouched</li>
+    <li>Ollie onto a <b>lane-divider rail</b> to grind — land square for a 50-50, side-on for a boardslide. It builds speed the longer you hold, and <b>SPACE</b> pops you off</li>
+    <li><b>WASD</b> skate &nbsp;·&nbsp; <b>SPACE</b> ollie &nbsp;·&nbsp; <b>MOUSE + CLICK</b> fire the harpoon, click again to release</li>
+    <li>On the rope: <b>W/S</b> reel in and out &nbsp;·&nbsp; <b>SHIFT</b> drags the tail and <b>A/D</b> strafe you across behind the car &nbsp;·&nbsp; <b>Q</b> release. Reeling builds swing, and swing is the slingshot</li>
+    <li>The harpoon also bites <b>structures</b> — anchor an overpass deck, pillar or tower and swing beneath it. Reeling in shortens the pendulum and spins you up</li>
+    <li>You start <b>hitched</b>. <b>A/D</b> slides you around the car's flanks and rear, <b>SPACE</b> kicks you off, <b>F</b> lets go. To hitch again, get alongside any car and match its pace</li>
+    <li>Crossings at s262 and s400 pass overhead — skate under them, or harpoon the underside and swing</li>
+    <li>Crossings pass over the highway — skate under them, or hit kicker-D at s232 above 83 km/h to land on one</li>
+  </ul>
+  <p style="font-size:11px;color:#5a6b7d;max-width:580px">Press <b>`</b> for the debug menu — arrow keys adjust, and the key list lower-left toggles the probe grid, arc trail, landing prediction, collision bounds and rope wrapping.</p>
+  <button id="go">DROP IN</button>
+</div>
+
+<div id="hud">
+  <div class="panel" id="diag">
+    <h3>MOTION</h3>
+    <div class="row"><span class="k">speed</span><span class="v" id="d-sp">0.0</span></div>
+    <div class="row"><span class="k">vertical</span><span class="v" id="d-vy">0.0</span></div>
+    <div class="row"><span class="k">state</span><span class="v" id="d-state">GROUNDED</span></div>
+    <div class="row"><span class="k">surface</span><span class="v" id="d-surf">road</span></div>
+    <div class="sep"></div>
+    <div class="row"><span class="k">hitch</span><span class="v" id="d-hitch">—</span></div>
+    <div class="row"><span class="k">perimeter</span><span class="v" id="d-peri">—</span></div>
+    <div class="row"><span class="k">nearest</span><span class="v" id="d-near">—</span></div>
+    <div class="row"><span class="k">reach / match</span><span class="v" id="d-match">—</span></div>
+    <div id="matchTrack"><div id="matchFill"></div></div>
+    <div class="sep"></div>
+    <div class="row"><span class="k">contact</span><span class="v" id="d-contact">—</span></div>
+    <div class="row"><span class="k">speed kept</span><span class="v" id="d-kept">—</span></div>
+    <div class="sep"></div>
+    <div class="row"><span class="k">air time</span><span class="v" id="d-air">0.00 s</span></div>
+    <div class="row"><span class="k">last impact</span><span class="v" id="d-imp">—</span></div>
+    <div class="row"><span class="k">flip / spin</span><span class="v" id="d-rot">—</span></div>
+    <div class="sep"></div>
+    <div class="row"><span class="k">tether</span><span class="v" id="d-teth">—</span></div>
+    <div class="row"><span class="k">total / live</span><span class="v" id="d-rope">—</span></div>
+    <div class="row"><span class="k">wraps</span><span class="v" id="d-wrap">0</span></div>
+    <div class="row"><span class="k">swing</span><span class="v" id="d-swing">—</span></div>
+    <div id="heatWrap"><div id="heatTrack"><div id="heatFill"></div></div></div>
+    <div class="sep"></div>
+    <div class="row"><span class="k">queries</span><span class="v" id="d-q">0</span></div>
+    <div class="row"><span class="k">streak / shake</span><span class="v" id="d-fx">0%</span></div>
+    <div class="row"><span class="k">cam act/tgt</span><span class="v" id="d-cam">—</span></div>
+    <div class="row"><span class="k">frame</span><span class="v" id="d-ms">0.0 ms</span></div>
+  </div>
+
+  <div class="panel" id="tune">
+    <h3>DEBUG</h3>
+    <div id="tune-rows"></div>
+    <div class="hint">← → select &nbsp; ↑ ↓ adjust<br>SHIFT+↑↓ coarse &nbsp; 0 reset all &nbsp; scroll to browse</div>
+  </div>
+
+  <div id="keys">
+    <b>WASD</b> skate &nbsp; <b>SPACE</b> ollie &nbsp; <b>CLICK</b> fire / release<br>
+    <b>F</b> hitch / let go &nbsp; on rope: <b>W/S</b> reel &nbsp; <b>Q</b> detach<br>
+    towed: <b>SHIFT</b>+<b>A/D</b> tail strafe &nbsp; free: <b>SHIFT</b> drift<br>
+    on the car: <b>A/D</b> slide &nbsp; <b>SPACE</b> ollie off<br>
+    <b>R</b> board trick &nbsp; air: <b>W/S</b> flip <b>A/D</b> spin<br>
+    <b>G</b> probe <span id="k-grid" class="off">off</span> &nbsp;
+    <b>T</b> arc <span id="k-trail" class="on">on</span><br>
+    <b>P</b> predict <span id="k-pred" class="on">on</span> &nbsp;
+    <b>H</b> rail <span id="k-rail" class="on">on</span> &nbsp;
+    <b>B</b> bounds <span id="k-bounds" class="off">off</span> &nbsp;
+    <b>V</b> speed FX <span id="k-fx" class="on">on</span> &nbsp;
+    <b>`</b> debug menu &nbsp; <b>C</b> stance &nbsp; <b>O</b> cam <span id="k-cam" class="on">chase</span> &nbsp; <b>X</b> respawn
+  </div>
+
+  <div id="speed"><span id="spd">0</span><small>KM/H</small></div>
+  <div id="banner"></div>
+  <div id="hitchCue">PRESS F TO HITCH</div>
+  <div id="crosshair"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+const V3=THREE.Vector3, UP=new V3(0,1,0);
+const clamp=THREE.MathUtils.clamp, lerp=THREE.MathUtils.lerp;
+const KMH=3.2;   // internal units/s → HUD km/h
+
+// ===================================================================
+// SCENE
+// ===================================================================
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x0a0614);
+scene.fog=new THREE.FogExp2(0x0a0614,0.0072);
+const camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,0.1,2200);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+document.body.appendChild(renderer.domElement);
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+scene.add(new THREE.AmbientLight(0x8888ff,0.55));
+const moon=new THREE.DirectionalLight(0x9fb0ff,0.6); moon.position.set(-50,100,-50); scene.add(moon);
+
+// ===================================================================
+// TUNABLES
+// ===================================================================
+const P={
+  gravity:        {v:22,     def:22,     min:4,  max:45,   step:1,     fine:0.25,   label:'gravity'},
+  ollie:          {v:9.5,    def:9.5,    min:2,  max:22,   step:1,     fine:0.25,   label:'ollie impulse'},
+  ollieUpBlend:   {v:0.5,    def:0.5,    min:0,  max:1,    step:0.1,   fine:0.02,   label:'ollie up-blend'},
+  thrust:         {v:13,     def:13,     min:2,  max:40,   step:1,     fine:0.5,    label:'thrust'},
+  maxSpeed:       {v:16,     def:16,     min:4,  max:45,   step:1,     fine:0.5,    label:'thrust cap'},
+  grip:           {v:8,      def:8,      min:0,  max:24,   step:1,     fine:0.25,   label:'grip (lateral)'},
+  towGrip:        {v:0.3,    def:0.3,    min:0,  max:1,    step:0.1,   fine:0.02,   label:'grip while towed'},
+  rollFriction:   {v:0.8,    def:0.8,    min:0,  max:8,    step:0.2,   fine:0.05,   label:'roll friction'},
+  dragQuad:       {v:0.0027, def:0.0027, min:0,  max:0.02, step:0.001, fine:0.0002, label:'quadratic drag'},
+  landingRecover: {v:0.35,   def:0.35,   min:0,  max:1,    step:0.1,   fine:0.02,   label:'landing recovery'},
+  turnRate:       {v:2.3,    def:2.3,    min:0.2,max:8,    step:0.2,   fine:0.05,   label:'ground turn'},
+  airYaw:         {v:4.5,    def:4.5,    min:0,  max:12,   step:0.5,   fine:0.1,    label:'air spin rate'},
+  flipRate:       {v:5.5,    def:5.5,    min:0,  max:14,   step:0.5,   fine:0.1,    label:'air flip rate'},
+  stanceRate:     {v:14,     def:14,     min:2,  max:40,   step:1,     fine:0.25,   label:'rider spin rate'},
+  flipMinOllies:  {v:1.2,    def:1.2,    min:0,  max:6,    step:0.1,   fine:0.05,   label:'flip min ollies'},
+  camYawRate:     {v:9,      def:9,      min:1,  max:30,   step:1,     fine:0.25,   label:'cam yaw follow'},
+  flipLandTol:    {v:0.6,    def:0.6,    min:0.1,max:1.6,  step:0.1,   fine:0.02,   label:'upright tolerance'},
+  bailRetain:     {v:0.3,    def:0.3,    min:0,  max:1,    step:0.05,  fine:0.01,   label:'bail speed keep'},
+  hitchSlide:     {v:4.0,    def:4.0,    min:0.5,max:14,   step:0.5,   fine:0.1,    label:'hitch slide rate'},
+  hitchStandoff:  {v:0.62,   def:0.62,   min:0.2,max:2,    step:0.1,   fine:0.02,   label:'hitch standoff'},
+  hitchReach:     {v:2.0,    def:2.0,    min:0.5,max:6,    step:0.25,  fine:0.05,   label:'hitch reach'},
+  hitchSpeedWin:  {v:20,     def:20,     min:2,  max:80,   step:5,     fine:1,      label:'hitch match km/h'},
+  hitchHeightWin: {v:1.8,    def:1.8,    min:0.3,max:6,    step:0.25,  fine:0.05,   label:'hitch height win'},
+  hitchPushOff:   {v:3.0,    def:3.0,    min:0,  max:12,   step:0.5,   fine:0.1,    label:'hitch push-off'},
+  brakePoseMinSpeed:{v:1.5,  def:1.5,    min:0,  max:10,   step:0.5,   fine:0.1,    label:'brake pose min spd'},
+  brakeAngle:     {v:22,     def:22,     min:0,  max:55,   step:2,     fine:0.5,    label:'tail brake angle°'},
+  brakeStrafe:    {v:26,     def:26,     min:0,  max:80,   step:2,     fine:0.5,    label:'tail brake strafe'},
+  brakeGrip:      {v:0.35,   def:0.35,   min:0.05,max:3,   step:0.05,  fine:0.01,   label:'tail strafe grip x'},
+  driftTurn:      {v:2.6,    def:2.6,    min:1,  max:6,    step:0.2,   fine:0.05,   label:'drift turn x'},
+  driftGrip:      {v:0.45,   def:0.45,   min:0.05,max:2,   step:0.05,  fine:0.01,   label:'drift grip x'},
+  driftDrag:      {v:5,      def:5,      min:0,  max:40,   step:1,     fine:0.25,   label:'drift drag'},
+  turnFalloff:    {v:0.6,    def:0.6,    min:0,  max:1.5,  step:0.1,   fine:0.05,   label:'turn 1/v falloff'},
+  trickDuration:  {v:0.42,   def:0.42,   min:0.15,max:1.2,  step:0.05,  fine:0.01,   label:'trick duration'},
+  trickHeatShave: {v:0.1,    def:0.1,    min:0,  max:0.5,  step:0.05,  fine:0.01,   label:'trick heat shave'},
+  grindAccel:     {v:0.35,   def:0.35,   min:0,  max:2,    step:0.05,  fine:0.01,   label:'grind accel /s'},
+  railFriction:   {v:0.6,    def:0.6,    min:0,  max:6,    step:0.2,   fine:0.05,   label:'rail friction'},
+  railMinSpeed:   {v:8,      def:8,      min:1,  max:30,   step:1,     fine:0.25,   label:'rail min speed'},
+  railSideAngle:  {v:45,     def:45,     min:15, max:80,   step:5,     fine:1,      label:'50-50 vs slide°'},
+  railCatchLat:   {v:1.0,    def:1.0,    min:0.2,max:4,    step:0.2,   fine:0.05,   label:'rail catch lateral'},
+  railCatchY:     {v:0.8,    def:0.8,    min:0.2,max:3,    step:0.2,   fine:0.05,   label:'rail catch height'},
+  grazeAngle:     {v:35,     def:35,     min:0,  max:90,   step:5,     fine:1,      label:'graze angle°'},
+  grazeBounce:    {v:2.5,    def:2.5,    min:0,  max:12,   step:0.5,   fine:0.1,    label:'graze bounce'},
+  grazeRetain:    {v:1.0,    def:1.0,    min:0.5,max:1.15, step:0.05,  fine:0.01,   label:'graze retain'},
+  hitRetain:      {v:0.35,   def:0.35,   min:0,  max:1,    step:0.05,  fine:0.01,   label:'hard hit retain'},
+  towRearBounce:  {v:1.4,    def:1.4,    min:0,  max:8,    step:0.5,   fine:0.1,    label:'tow rear bounce'},
+  sparkRate:      {v:1.0,    def:1.0,    min:0,  max:3,    step:0.25,  fine:0.05,   label:'spark rate'},
+  swingReelAccel: {v:14,     def:14,     min:0,  max:60,   step:2,     fine:0.5,    label:'swing reel pull'},
+  swingReelMult:  {v:1.0,    def:1.0,    min:0.5,max:5,    step:0.5,   fine:0.1,    label:'swing reel rate x'},
+  swingRetain:    {v:1.0,    def:1.0,    min:0.5,max:1.1,  step:0.05,  fine:0.01,   label:'swing speed keep'},
+  swingDamp:      {v:0,      def:0,      min:0,  max:1,    step:0.05,  fine:0.01,   label:'swing damping'},
+  reelAccel:      {v:26,     def:26,     min:0,  max:80,   step:2,     fine:0.5,    label:'reel pull'},
+  reelRate:       {v:9,      def:9,      min:1,  max:30,   step:1,     fine:0.25,   label:'reel rate'},
+  ropeDamp:       {v:0.12,   def:0.12,   min:0,  max:1,    step:0.05,  fine:0.01,   label:'rope damping'},
+  wrapHyst:       {v:5,      def:5,      min:0,  max:30,   step:2,     fine:0.5,    label:'wrap hysteresis°'},
+  cornerInset:    {v:0.18,   def:0.18,   min:0,  max:1.2,  step:0.1,   fine:0.02,   label:'corner inset'},
+  ropeHeightPad:  {v:0.25,   def:0.25,   min:0,  max:3,    step:0.25,  fine:0.05,   label:'rope height pad'},
+  minLiveLen:     {v:1.4,    def:1.4,    min:0.5,max:6,    step:0.5,   fine:0.1,    label:'min live length'},
+  roofBounce:     {v:5.5,    def:5.5,    min:0,  max:16,   step:0.5,   fine:0.1,    label:'car roof bounce'},
+  heatFill:       {v:0.55,   def:0.55,   min:0.1,max:2,    step:0.05,  fine:0.01,   label:'heat fill rate'},
+  streakStart:    {v:90,     def:90,     min:0,  max:220,  step:10,    fine:2,      label:'streak start km/h'},
+  streakFull:     {v:170,    def:170,    min:20, max:400,  step:10,    fine:2,      label:'streak full km/h'},
+  streakStream:   {v:55,     def:55,     min:10, max:200,  step:5,     fine:1,      label:'streak stream rate'},
+  streakOpacity:  {v:0.6,    def:0.6,    min:0.05,max:1,   step:0.05,  fine:0.01,   label:'streak opacity max'},
+  streakNearFade: {v:8,      def:8,      min:1,  max:40,   step:1,     fine:0.5,    label:'streak near fade'},
+  fovKick:        {v:18,     def:18,     min:-25,max:45,   step:2,     fine:0.5,    label:'FOV kick°'},
+  fovStart:       {v:50,     def:50,     min:0,  max:400,  step:10,    fine:2,      label:'FOV start km/h'},
+  fovFull:        {v:200,    def:200,    min:20, max:500,  step:10,    fine:2,      label:'FOV full km/h'},
+  fovCurve:       {v:1.3,    def:1.3,    min:0.5,max:4,    step:0.1,   fine:0.05,   label:'FOV curve'},
+  camFollow:      {v:14,     def:14,     min:2,  max:40,   step:1,     fine:0.25,   label:'cam follow rate'},
+  camLagComp:     {v:1.0,    def:1.0,    min:0,  max:1.5,  step:0.1,   fine:0.02,   label:'cam lag comp'},
+  camFar:         {v:9.0,    def:9.0,    min:4,  max:20,   step:0.5,   fine:0.1,    label:'cam dist slow'},
+  camNear:        {v:5.0,    def:5.0,    min:1.5,max:12,   step:0.5,   fine:0.1,    label:'cam dist fast'},
+  camMinDist:     {v:5.0,    def:5.0,    min:1,  max:12,   step:0.5,   fine:0.1,    label:'cam min distance'},
+  lookHighSlow:   {v:1.4,    def:1.4,    min:0.2,max:5,    step:0.2,   fine:0.05,   label:'look height slow'},
+  lookHighFast:   {v:2.2,    def:2.2,    min:0.2,max:6,    step:0.2,   fine:0.05,   label:'look height fast'},
+  lookAheadFast:  {v:2.5,    def:2.5,    min:0,  max:12,   step:0.5,   fine:0.1,    label:'look ahead fast'},
+  rampAlign:      {v:1.0,    def:1.0,    min:0,  max:1.2,  step:0.1,   fine:0.05,   label:'ramp align'},
+  rampAlignMax:   {v:55,     def:55,     min:5,  max:90,   step:5,     fine:1,      label:'ramp align cap°'},
+  rampAlignRate:  {v:5,      def:5,      min:0.5,max:20,   step:0.5,   fine:0.1,    label:'ramp align rate'},
+  camHighSlow:    {v:4.4,    def:4.4,    min:1,  max:10,   step:0.5,   fine:0.1,    label:'cam height slow'},
+  camHighFast:    {v:2.9,    def:2.9,    min:0.5,max:10,   step:0.5,   fine:0.1,    label:'cam height fast'},
+  zoomStart:      {v:40,     def:40,     min:0,  max:300,  step:10,    fine:2,      label:'zoom start km/h'},
+  zoomFull:       {v:150,    def:150,    min:20, max:500,  step:10,    fine:2,      label:'zoom full km/h'},
+  zoomCurve:      {v:1.3,    def:1.3,    min:0.5,max:4,    step:0.1,   fine:0.05,   label:'zoom curve'},
+  camShake:       {v:0.055,  def:0.055,  min:0,  max:0.6,  step:0.05,  fine:0.005,  label:'camera shake peak'},
+  shakeStart:     {v:50,     def:50,     min:0,  max:400,  step:10,    fine:2,      label:'shake start km/h'},
+  shakeWild:      {v:260,    def:260,    min:60, max:500,  step:10,    fine:2,      label:'shake wild km/h'},
+  shakeCurve:     {v:1.3,    def:1.3,    min:0.5,max:4,    step:0.1,   fine:0.05,   label:'shake curve'},
+};
+const P_KEYS=Object.keys(P);
+let tuneSel=0;
+const g=k=>P[k].v;
+// Three effects now ride speed on their own curve — zoom, FOV and shake.
+// One shape function so they stay comparable and each keeps its own band.
+function speedRamp(kmh,startKey,fullKey,curveKey){
+  const a=g(startKey),b=g(fullKey);
+  return Math.pow(clamp((kmh-a)/Math.max(1,b-a),0,1),g(curveKey));
+}
+// section headers keyed by the param they precede — keeps the flat index
+// navigation intact while making 60-odd rows actually findable
+const TUNE_GROUPS={gravity:'MOVEMENT',hitchSlide:'HITCH',grazeAngle:'CONTACT',
+  reelAccel:'HARPOON',streakStart:'SPEED LINES',fovKick:'CAMERA',camShake:'SHAKE'};
+function buildTuneRows(){
+  document.getElementById('tune-rows').innerHTML=P_KEYS.map((k,i)=>
+    (TUNE_GROUPS[k]?`<div class="tgrp">${TUNE_GROUPS[k]}</div>`:'')+
+    `<div class="row${i===tuneSel?' sel':''}" data-i="${i}"><span class="k">${P[k].label}</span><span class="v" id="t-${k}"></span></div>`
+  ).join('');
+  syncTuneValues();
+}
+function syncTuneValues(){
+  for (const k of P_KEYS){
+    const p=P[k];
+    document.getElementById('t-'+k).textContent=p.v.toFixed(p.step<0.01?4:p.step<1?2:1);
+  }
+  document.querySelectorAll('#tune-rows .row').forEach(el=>{
+    const on=+el.dataset.i===tuneSel;
+    el.classList.toggle('sel',on);
+    // the panel scrolls, so the selection has to bring itself into view —
+    // arrow-key navigation would otherwise walk off the bottom unseen
+    if (on && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+  });
+}
+function adjustTune(dir,coarse){
+  const p=P[P_KEYS[tuneSel]];
+  p.v=clamp(p.v+dir*(coarse?p.step:p.fine),p.min,p.max);
+  syncTuneValues();
+}
+
+// ===================================================================
+// PATH
+// ===================================================================
+const ROAD_WIDTH=28,LANE_COUNT=5,LANE_WIDTH=ROAD_WIDTH/LANE_COUNT;
+const RAIL_MIN_S=470;   // procedural rails stay clear of the scripted fixtures
+const SAMPLE_STEP=4,LOOKAHEAD=320,BEHIND_TRIM=180;
+function smoothstep(t){ t=clamp(t,0,1); return t*t*t*(t*(t*6-15)+10); }
+const pathPoints=[];
+let genS=0,genX=0,genY=0,genZ=0,genHeading=Math.PI,pathDirty=true;
+const segQueue=[]; let currentSeg=null,segProgress=0;
+const scripted=[
+  {type:'straight',length:280,curvature:0,rise:0},
+  {type:'rampUp',  length:55, curvature:0,rise:18},
+  {type:'flat',    length:70, curvature:0,rise:0},
+  {type:'rampDown',length:55, curvature:0,rise:18},
+  {type:'straight',length:60, curvature:0,rise:0},
+];
+function refillSegQueue(){
+  while (segQueue.length<2){
+    if (scripted.length){ segQueue.push(scripted.shift()); continue; }
+    const r=Math.random();
+    if (r<0.52) segQueue.push({type:'straight',length:70+Math.random()*110,curvature:0,rise:0});
+    else if (r<0.80){
+      const dir=Math.random()<0.5?-1:1,length=55+Math.random()*70;
+      segQueue.push({type:'turn',length,curvature:(dir*(20+Math.random()*50)*Math.PI/180)/length,rise:0});
+    } else {
+      const rise=14+Math.random()*14,rampLen=45+Math.random()*25;
+      segQueue.push({type:'rampUp',length:rampLen,curvature:0,rise});
+      segQueue.push({type:'flat',length:35+Math.random()*45,curvature:0,rise:0});
+      segQueue.push({type:'rampDown',length:rampLen,curvature:0,rise});
+    }
+  }
+}
+function ensurePathGenerated(aheadS){
+  while (genS<aheadS){
+    if (!currentSeg||segProgress>=currentSeg.length-1e-6){
+      refillSegQueue(); currentSeg=segQueue.shift(); segProgress=0;
+      maybeQueueRail(currentSeg,genS);
+    }
+    const step=Math.min(SAMPLE_STEP,currentSeg.length-segProgress);
+    if (currentSeg.type==='turn') genHeading+=currentSeg.curvature*step;
+    let dy=0,pitch=0;
+    if (currentSeg.type==='rampUp'||currentSeg.type==='rampDown'){
+      const t0=segProgress/currentSeg.length,t1=(segProgress+step)/currentSeg.length;
+      dy=(smoothstep(t1)-smoothstep(t0))*currentSeg.rise*(currentSeg.type==='rampDown'?-1:1);
+      pitch=Math.atan2(dy,step);
+    }
+    genX+=Math.sin(genHeading)*step; genZ+=Math.cos(genHeading)*step;
+    genY+=dy; genS+=step; segProgress+=step;
+    pathPoints.push({s:genS,x:genX,y:genY,z:genZ,heading:genHeading,pitch});
+    pathDirty=true;
+  }
+}
+function trimPath(b){ let i=0; while(i<pathPoints.length-2&&pathPoints[i].s<b)i++; if(i>0){pathPoints.splice(0,i);pathDirty=true;} }
+function samplePath(s){
+  if (!pathPoints.length) return {x:0,y:0,z:0,heading:Math.PI,pitch:0};
+  if (s<=pathPoints[0].s) return pathPoints[0];
+  if (s>=pathPoints[pathPoints.length-1].s) return pathPoints[pathPoints.length-1];
+  let lo=0,hi=pathPoints.length-1;
+  while (hi-lo>1){ const m=(lo+hi)>>1; if(pathPoints[m].s<=s) lo=m; else hi=m; }
+  const a=pathPoints[lo],b=pathPoints[hi],t=(s-a.s)/Math.max(1e-4,b.s-a.s);
+  return {x:lerp(a.x,b.x,t),y:lerp(a.y,b.y,t),z:lerp(a.z,b.z,t),
+          heading:a.heading+(b.heading-a.heading)*t,pitch:lerp(a.pitch,b.pitch,t)};
+}
+function pathToWorld(s,lat,h){
+  const p=samplePath(s),perpX=-Math.cos(p.heading),perpZ=Math.sin(p.heading);
+  return {x:p.x+perpX*lat,y:p.y+h,z:p.z+perpZ*lat,heading:p.heading,pitch:p.pitch};
+}
+function pathToWorldPerp(s,lat,h){
+  const p=samplePath(s),perpX=-Math.cos(p.heading),perpZ=Math.sin(p.heading);
+  const dirX=Math.sin(p.heading),dirZ=Math.cos(p.heading);
+  const cp=Math.cos(p.pitch),sp=Math.sin(p.pitch);
+  return {x:p.x+perpX*lat-sp*dirX*h,y:p.y+cp*h,z:p.z+perpZ*lat-sp*dirZ*h,heading:p.heading,pitch:p.pitch};
+}
+let pathQueryCount=0;
+function worldToPath(x,z){
+  pathQueryCount++;
+  let bestD=Infinity,bestS=0,bestLat=0,bestPoint=pathPoints[0];
+  for (let i=0;i<pathPoints.length-1;i++){
+    const a=pathPoints[i],b=pathPoints[i+1];
+    const abx=b.x-a.x,abz=b.z-a.z,L=abx*abx+abz*abz||1e-6;
+    const t=clamp(((x-a.x)*abx+(z-a.z)*abz)/L,0,1);
+    const px=a.x+abx*t,pz=a.z+abz*t,dx=x-px,dz=z-pz,d=dx*dx+dz*dz;
+    if (d<bestD){
+      bestD=d;
+      const heading=a.heading+(b.heading-a.heading)*t;
+      bestS=a.s+(b.s-a.s)*t;
+      bestLat=dx*(-Math.cos(heading))+dz*Math.sin(heading);
+      bestPoint={s:bestS,x:px,y:lerp(a.y,b.y,t),z:pz,heading,pitch:lerp(a.pitch,b.pitch,t)};
+    }
+  }
+  return {s:bestS,lateral:bestLat,point:bestPoint};
+}
+
+// ---------- road mesh ----------
+const roadGeo=new THREE.BufferGeometry();
+scene.add(Object.assign(new THREE.Mesh(roadGeo,new THREE.MeshStandardMaterial({color:0x15121f,roughness:0.7,metalness:0.3,side:THREE.DoubleSide})),{frustumCulled:false}));
+const edgeMat=new THREE.MeshBasicMaterial({color:0xff2fd0});
+const edgeGeoL=new THREE.BufferGeometry(),edgeGeoR=new THREE.BufferGeometry();
+scene.add(Object.assign(new THREE.Mesh(edgeGeoL,edgeMat),{frustumCulled:false}));
+scene.add(Object.assign(new THREE.Mesh(edgeGeoR,edgeMat),{frustumCulled:false}));
+const laneMat=new THREE.MeshBasicMaterial({color:0x00ffe1,transparent:true,opacity:0.32});
+const laneGeos=[];
+for (let i=1;i<LANE_COUNT;i++){
+  const gm=new THREE.BufferGeometry();
+  scene.add(Object.assign(new THREE.Mesh(gm,laneMat),{frustumCulled:false}));
+  laneGeos.push(gm);
+}
+function buildRibbon(geo,off,width,hOff){
+  const pos=[],hw=width/2;
+  for (const p of pathPoints){
+    const perpX=-Math.cos(p.heading),perpZ=Math.sin(p.heading);
+    const cx=p.x+perpX*off,cz=p.z+perpZ*off;
+    pos.push(cx+perpX*-hw,p.y+hOff,cz+perpZ*-hw, cx+perpX*hw,p.y+hOff,cz+perpZ*hw);
+  }
+  const idx=[];
+  for (let i=0;i<pathPoints.length-1;i++){ const a=i*2; idx.push(a,a+1,a+2,a+1,a+3,a+2); }
+  geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  geo.setIndex(idx); geo.computeVertexNormals(); geo.computeBoundingSphere();
+}
+function rebuildRoadMeshes(){
+  if (pathPoints.length<2) return;
+  buildRibbon(roadGeo,0,ROAD_WIDTH,0);
+  buildRibbon(edgeGeoL,-ROAD_WIDTH/2,0.4,0.05);
+  buildRibbon(edgeGeoR,ROAD_WIDTH/2,0.4,0.05);
+  for (let i=1;i<LANE_COUNT;i++) buildRibbon(laneGeos[i-1],-ROAD_WIDTH/2+i*LANE_WIDTH,0.15,0.08);
+  pathDirty=false;
+}
+
+// ===================================================================
+// SPARKS
+// ===================================================================
+const SPARK_COUNT=90;
+const sparkGeo=new THREE.BoxGeometry(0.05,0.05,0.34);
+const sparks=[];
+for (let i=0;i<SPARK_COUNT;i++){
+  const mat=new THREE.MeshBasicMaterial({color:0xffe14d,transparent:true,opacity:0,
+    blending:THREE.AdditiveBlending,depthWrite:false});
+  const mesh=new THREE.Mesh(sparkGeo,mat);
+  mesh.visible=false; scene.add(mesh);
+  sparks.push({mesh,life:0,maxLife:1,vel:new V3()});
+}
+const SPARK_COLORS=[0xffe14d,0xfff4c8,0xffa63f,0xffffff];
+let sparkCursor=0;
+function freeSpark(){
+  for (let i=0;i<SPARK_COUNT;i++){
+    const s=sparks[(sparkCursor+i)%SPARK_COUNT];
+    if (s.life<=0){ sparkCursor=(sparkCursor+i+1)%SPARK_COUNT; return s; }
+  }
+  return null;
+}
+const _sv=new V3(), _fwdZ=new V3(0,0,1);
+function emitContactSpark(origin,tangDir,nrm,tangSpeed){
+  const s=freeSpark(); if(!s) return;
+  s.mesh.position.set(origin.x+(Math.random()-0.5)*0.18,
+                      origin.y+(Math.random()-0.5)*0.22,
+                      origin.z+(Math.random()-0.5)*0.18);
+  if (tangDir.lengthSq()>1e-6) _sv.copy(tangDir).normalize().multiplyScalar(-(1.5+tangSpeed*(0.28+Math.random()*0.3)));
+  else _sv.copy(nrm).multiplyScalar(2);
+  _sv.addScaledVector(nrm,1.6+Math.random()*4.0);
+  _sv.x+=(Math.random()-0.5)*2.4;
+  _sv.z+=(Math.random()-0.5)*2.4;
+  _sv.y+=0.8+Math.random()*3.0;
+  s.vel.copy(_sv);
+  s.maxLife=0.18+Math.random()*0.26;
+  s.life=s.maxLife;
+  s.mesh.visible=true;
+  s.mesh.material.color.setHex(SPARK_COLORS[Math.floor(Math.random()*SPARK_COLORS.length)]);
+  s.mesh.material.opacity=1;
+}
+// Sparks off the harpoon mount while the winch is hauling. Distinct from the
+// contact emitter: those fly off a panel along its normal, these stream back
+// down the cable away from whatever it's biting.
+function emitRopeSpark(origin,backDir,speed,colorHex){
+  const s=freeSpark(); if(!s) return;
+  s.mesh.position.set(origin.x+(Math.random()-0.5)*0.13,
+                      origin.y+(Math.random()-0.5)*0.13,
+                      origin.z+(Math.random()-0.5)*0.13);
+  _sv.copy(backDir).multiplyScalar(speed*(0.5+Math.random()*0.9));
+  _sv.x+=(Math.random()-0.5)*3.2;
+  _sv.z+=(Math.random()-0.5)*3.2;
+  _sv.y+=0.5+Math.random()*2.2;
+  s.vel.copy(_sv);
+  s.maxLife=0.13+Math.random()*0.19;
+  s.life=s.maxLife;
+  s.mesh.visible=true;
+  s.mesh.material.color.setHex(colorHex!==undefined?colorHex:SPARK_COLORS[Math.floor(Math.random()*SPARK_COLORS.length)]);
+  s.mesh.material.opacity=1;
+}
+function updateSparks(dt){
+  for (const s of sparks){
+    if (s.life<=0){ if (s.mesh.visible) s.mesh.visible=false; continue; }
+    s.life-=dt;
+    s.vel.y-=16*dt;
+    s.mesh.position.addScaledVector(s.vel,dt);
+    const t=Math.max(0,s.life/s.maxLife);
+    s.mesh.material.opacity=t;
+    const sp=s.vel.length();
+    s.mesh.scale.set(1,1,clamp(0.5+sp*0.14,0.5,4));
+    if (sp>1e-3){ _sv.copy(s.vel).normalize(); s.mesh.quaternion.setFromUnitVectors(_fwdZ,_sv); }
+    if (s.life<=0) s.mesh.visible=false;
+  }
+}
+
+// ===================================================================
+// SURFACE REGISTRY
+// ===================================================================
+const surfaces=[]; let surfaceQueryCount=0;
+const CELL=48,solidGrid=new Map(),solids=[],cars=[];
+const cellKey=(cx,cz)=>cx+','+cz;
+function gridInsert(s){
+  const r=Math.max(s.w,s.d)*0.75;
+  const x0=Math.floor((s.x-r)/CELL),x1=Math.floor((s.x+r)/CELL);
+  const z0=Math.floor((s.z-r)/CELL),z1=Math.floor((s.z+r)/CELL);
+  s._cells=[];
+  for (let cx=x0;cx<=x1;cx++) for (let cz=z0;cz<=z1;cz++){
+    const k=cellKey(cx,cz);
+    if(!solidGrid.has(k)) solidGrid.set(k,[]);
+    solidGrid.get(k).push(s); s._cells.push(k);
+  }
+}
+function gridRemove(s){
+  for (const k of s._cells||[]){
+    const arr=solidGrid.get(k); if(!arr) continue;
+    const i=arr.indexOf(s); if(i>=0) arr.splice(i,1);
+    if(!arr.length) solidGrid.delete(k);
+  }
+}
+surfaces.push({id:'road',query(x,z){
+  const proj=worldToPath(x,z);
+  if (Math.abs(proj.lateral)>ROAD_WIDTH/2+2) return null;
+  return {y:proj.point.y,pitch:proj.point.pitch,heading:proj.point.heading,id:'road',onRoad:true,ref:null};
+}});
+surfaces.push({id:'solids',query(x,z){
+  const arr=solidGrid.get(cellKey(Math.floor(x/CELL),Math.floor(z/CELL)));
+  if (!arr||!arr.length) return null;
+  let best=null,bestTop=null;
+  for (const s of arr){
+    const dx=x-s.x,dz=z-s.z,sh=Math.sin(s.heading),ch=Math.cos(s.heading);
+    const lf=dx*sh+dz*ch,lr=dx*ch-dz*sh;
+    if (Math.abs(lf)>s.d/2||Math.abs(lr)>s.w/2) continue;
+    const top=s.topAt(lf);
+    if (!best||top.y>bestTop.y){ best=s; bestTop=top; }
+  }
+  return best?{y:bestTop.y,pitch:bestTop.pitch,heading:best.heading,id:best.label,onRoad:!!best.onRoad,ref:best}:null;
+}});
+const CAR_NEAR_RANGE=55;
+surfaces.push({id:'cars',query(x,z){
+  let best=null,bestY=-Infinity;
+  for (const c of cars){
+    if (Math.abs(c.pathS-st.pathS)>CAR_NEAR_RANGE) continue;
+    const h=c.mesh.rotation.y;
+    const dx=x-c.mesh.position.x,dz=z-c.mesh.position.z;
+    const lf=dx*Math.sin(h)+dz*Math.cos(h),lr=dx*Math.cos(h)-dz*Math.sin(h);
+    if (Math.abs(lf)>c.type.d/2||Math.abs(lr)>c.type.w/2) continue;
+    const pitch=-c.mesh.rotation.x;
+    const y=c.mesh.position.y+c.type.h/2*Math.cos(pitch)+lf*Math.tan(pitch);
+    if (y>bestY){ bestY=y; best=c; best._pitch=pitch; }
+  }
+  return best?{y:bestY,pitch:best._pitch,heading:best.mesh.rotation.y,id:'car:'+best.type.name,onRoad:true,ref:best,isCar:true}:null;
+}});
+const STEP_UP=0.4;
+function sampleGround(x,z,feetY){
+  surfaceQueryCount++;
+  let best=null;
+  for (const surf of surfaces){
+    const hit=surf.query(x,z);
+    if (!hit) continue;
+    if (hit.y>feetY+STEP_UP) continue;
+    if (!best||hit.y>best.y) best=hit;
+  }
+  if (best) return best;
+  return surfaces[0].query(x,z)||{y:-Infinity,pitch:0,heading:0,id:'void',onRoad:false,ref:null};
+}
+const _n=new V3();
+function normalOf(hit){
+  if (hit.y===-Infinity) return UP.clone();
+  const sp=Math.sin(hit.pitch),cp=Math.cos(hit.pitch);
+  return _n.set(-sp*Math.sin(hit.heading),cp,-sp*Math.cos(hit.heading)).clone();
+}
+
+// ===================================================================
+// SOLIDS
+// ===================================================================
+function addBox(o){
+  const mesh=new THREE.Mesh(new THREE.BoxGeometry(o.w,o.h,o.d),
+    new THREE.MeshStandardMaterial({color:o.color||0x241a35,roughness:0.85,emissive:o.emissive||0,emissiveIntensity:0.35}));
+  mesh.rotation.y=o.heading||0; mesh.position.set(o.x,o.baseY+o.h/2,o.z); scene.add(mesh);
+  const topY=o.baseY+o.h;
+  const sol={x:o.x,z:o.z,w:o.w,d:o.d,heading:o.heading||0,label:o.label,onRoad:!!o.onRoad,
+             grappleable:!!o.grappleable,mesh,topY,topAt(){return{y:topY,pitch:0};}};
+  solids.push(sol); gridInsert(sol);
+  const lip=new THREE.Mesh(new THREE.BoxGeometry(o.w*1.005,0.06,o.d*1.005),
+    new THREE.MeshBasicMaterial({color:0x00ffe1,transparent:true,opacity:0.5}));
+  lip.rotation.y=o.heading||0; lip.position.set(o.x,topY+0.03,o.z); scene.add(lip); sol.lip=lip;
+  return sol;
+}
+const SHAPES={linear:{f:t=>t,df:()=>1},kicker:{f:t=>Math.pow(t,1.8),df:t=>1.8*Math.pow(Math.max(t,1e-4),0.8)}};
+function makeWedgeGeometry(w,d,rise,shape,segs){
+  const S=SHAPES[shape],hw=w/2,hd=d/2,floor=Math.min(0,rise)-0.7,pos=[],idx=[];
+  for (let i=0;i<=segs;i++){
+    const t=i/segs,z=-hd+d*t,y=rise*S.f(t);
+    pos.push(-hw,y,z, hw,y,z, -hw,floor,z, hw,floor,z);
+  }
+  for (let i=0;i<segs;i++){
+    const a=i*4,b=a+4;
+    idx.push(a,a+1,b, a+1,b+1,b, a+2,b+2,a, a,b+2,b, a+3,a+1,b+3, a+1,b+1,b+3);
+  }
+  const last=segs*4;
+  idx.push(0,2,3, 0,3,1, last,last+3,last+2, last,last+1,last+3);
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  geo.setIndex(idx); geo.computeVertexNormals(); geo.computeBoundingSphere();
+  return geo;
+}
+function addWedge(o){
+  const shape=o.shape||'linear',S=SHAPES[shape];
+  const mesh=new THREE.Mesh(makeWedgeGeometry(o.w,o.d,o.rise,shape,20),
+    new THREE.MeshStandardMaterial({color:o.color||0x2a1030,roughness:0.6,metalness:0.25,
+      emissive:o.emissive||0x3a0030,emissiveIntensity:0.45,side:THREE.DoubleSide}));
+  mesh.rotation.y=o.heading||0; mesh.position.set(o.x,o.baseY,o.z); scene.add(mesh);
+  const d=o.d,rise=o.rise,baseY=o.baseY;
+  const sol={x:o.x,z:o.z,w:o.w,d,heading:o.heading||0,label:o.label,onRoad:!!o.onRoad,mesh,
+    topY:baseY+Math.max(0,rise),
+    topAt(lf){ const t=clamp((lf+d/2)/d,0,1); return {y:baseY+rise*S.f(t),pitch:Math.atan(rise*S.df(t)/d)}; }};
+  solids.push(sol); gridInsert(sol);
+  const lip=new THREE.Mesh(new THREE.BoxGeometry(o.w*1.01,0.12,0.3),new THREE.MeshBasicMaterial({color:0xffe14d}));
+  lip.rotation.y=o.heading||0;
+  lip.position.set(o.x+Math.sin(sol.heading)*(d/2),baseY+rise+0.06,o.z+Math.cos(sol.heading)*(d/2));
+  scene.add(lip); sol.lip=lip;
+  return sol;
+}
+function buildFixtures(){
+  const mk=(s,lat,o)=>{ const p=pathToWorld(s,lat,0); return Object.assign({x:p.x,z:p.z,baseY:p.y,heading:p.heading},o); };
+  // opening run-in left clear; the launch fixtures start at kicker-D (s232)
+  [1.2,2.4,3.6,6.0].forEach((h,i)=>{
+    const p=pathToWorld(190+i*11,ROAD_WIDTH/2+7,0);
+    addBox({x:p.x,z:p.z,w:14,d:10,h,baseY:p.y,heading:p.heading,label:'step-'+h.toFixed(1),color:0x2a1f3d,emissive:0x2a0f3a});
+  });
+  const plaza=pathToWorld(225,-(ROAD_WIDTH/2+22),0);
+  addBox({x:plaza.x,z:plaza.z,w:44,d:52,h:2.2,baseY:plaza.y,heading:plaza.heading,label:'plaza',color:0x1d2438,emissive:0x00323a});
+  addBox({x:plaza.x+6,z:plaza.z+6,w:10,d:10,h:3.4,baseY:plaza.y+2.2,heading:plaza.heading,label:'kiosk',color:0x2c1b3a,emissive:0x3a0030});
+  const plateauY=samplePath(345).y,perch=pathToWorld(345,ROAD_WIDTH/2+20,0);
+  addBox({x:perch.x,z:perch.z,w:30,d:64,h:Math.max(1,plateauY-perch.y+0.1),baseY:perch.y,
+          heading:perch.heading,label:'perch',grappleable:true,color:0x1a2b30,emissive:0x004038});
+
+  // crossings to skate under. No launch geometry on the road any more, so
+  // reaching a deck means a mega-vert or a swing on the harpoon.
+  addOverpass(262,{clearance:12,span:ROAD_WIDTH+52,deckW:16});
+  // a second one low over a straight, purely to skate under at speed
+  addOverpass(400,{clearance:9.5,span:ROAD_WIDTH+40,deckW:12});
+  // deliberate rail test: ollie from the road onto a divider and ride it
+  queueRail(168,198,-ROAD_WIDTH/2+2*LANE_WIDTH);
+  queueRail(300,332, ROAD_WIDTH/2-2*LANE_WIDTH);
+}
+// ===================================================================
+// OVERPASSES — crossings that pass ABOVE the highway
+// ===================================================================
+//
+// Distinct from the highway's own rampUp/flat/rampDown, which is the road
+// itself climbing. These are separate decks spanning across it.
+//
+// Two things fall out of the surface registry for free: the deck is skateable
+// the moment it's registered, and driving underneath needs no work at all —
+// sampleGround rejects any surface above the feet, so a deck 12 units up is
+// simply not underfoot until you're on it.
+const decor=[];
+function addDecor(mesh,sEnd){ scene.add(mesh); decor.push({mesh,sEnd}); return mesh; }
+function cleanupDecor(before){
+  for (let i=decor.length-1;i>=0;i--){
+    if (decor[i].sEnd<before){ scene.remove(decor[i].mesh); decor.splice(i,1); }
+  }
+}
+const deckStripMat=new THREE.MeshBasicMaterial({color:0x00ffe1});
+const deckGlowMat=new THREE.MeshBasicMaterial({color:0xff2fd0,transparent:true,opacity:0.75});
+
+function addOverpass(s,o){
+  o=o||{};
+  const clearance=o.clearance!==undefined?o.clearance:11+Math.random()*4.5;
+  const span=o.span||ROAD_WIDTH+44+Math.random()*22;
+  const deckW=o.deckW||13+Math.random()*6;
+  const thick=1.1;
+  // clear the HIGHEST road point the deck spans, not just the centre sample —
+  // the highway can be mid-ramp underneath a crossing
+  let maxY=-Infinity;
+  for (let ds=-deckW;ds<=deckW;ds+=3) maxY=Math.max(maxY,samplePath(s+ds).y);
+  const p=samplePath(s);
+  const baseY=maxY+clearance;
+  const cross=p.heading+Math.PI/2+(o.skew||0);
+  const sEnd=s+deckW+4;
+  const rx=Math.cos(cross),rz=-Math.sin(cross);   // deck-local lateral axis
+
+  // deck: d runs along the crossing (the span), w is the carriageway width
+  const deck=addBox({x:p.x,z:p.z,w:deckW,d:span,h:thick,baseY,heading:cross,
+                     label:'overpass',grappleable:true,color:0x1b1826,emissive:0x2a0030});
+  deck.sEnd=sEnd;
+
+  // pillars sit outside the carriageway. Static solids have no lateral
+  // collision in this build, so anything in the driving line would be a ghost.
+  [-1,1].forEach(side=>{
+    const pw=pathToWorld(s,side*(ROAD_WIDTH/2+7),0);
+    const col=addBox({x:pw.x,z:pw.z,w:3.4,d:3.4,h:Math.max(1,baseY-pw.y),baseY:pw.y,
+                      heading:cross,label:'pillar',grappleable:true,color:0x151322,emissive:0x1a0020});
+    col.sEnd=sEnd;
+  });
+
+  // edge strips read the deck as a road from below and give you an edge to
+  // judge when you're skating it. No point lights — 40 cars already carry one
+  // each and mobile shader uniform limits are a known ceiling.
+  [-1,1].forEach(side=>{
+    const m=new THREE.Mesh(new THREE.BoxGeometry(0.34,0.3,span*0.99),deckStripMat);
+    m.rotation.y=cross;
+    m.position.set(p.x+rx*side*(deckW/2), baseY+thick+0.15, p.z+rz*side*(deckW/2));
+    addDecor(m,sEnd);
+  });
+  // underside glow panels, so it reads as a structure when you pass beneath
+  for (let i=-1;i<=1;i++){
+    const m=new THREE.Mesh(new THREE.BoxGeometry(deckW*0.55,0.12,2.2),deckGlowMat);
+    m.rotation.y=cross;
+    const along=i*span*0.22;
+    m.position.set(p.x+Math.sin(cross)*along, baseY-0.09, p.z+Math.cos(cross)*along);
+    addDecor(m,sEnd);
+  }
+  return deck;
+}
+
+let nextOverpassS=460;
+function maybeSpawnOverpasses(a){
+  while (nextOverpassS<a){ addOverpass(nextOverpassS); nextOverpassS+=170+Math.random()*170; }
+}
+
+// ===================================================================
+// GRIND RAILS
+// ===================================================================
+//
+// A rail is NOT a surface. The registry answers "what is underfoot", which is
+// a 2D constraint leaving you free in two directions — fine for a deck, wrong
+// for a 0.28-wide bar you'd fall off instantly. A rail is a 1D constraint:
+// locked to a line, free only along it. So it's a mode, built the same way
+// hitch mode is — the player becomes an arc-length position on a curve.
+const rails=[], pendingRails=[];
+const railMat=new THREE.MeshStandardMaterial({color:0x00ffe1,emissive:0x00ffe1,
+  emissiveIntensity:0.7,metalness:0.85,roughness:0.2});
+const SPARK_GRIND=0xfff2c0;
+let railsEnabled=true;
+
+function maybeQueueRail(seg,startS){
+  if (!seg||(seg.type!=='straight'&&seg.type!=='turn')) return;
+  if (startS<RAIL_MIN_S) return;          // keep clear of the scripted fixtures
+  if (Math.random()>0.28) return;
+  const margin=8, usable=seg.length-margin*2;
+  if (usable<20) return;
+  const long=Math.random()<0.18;
+  const railLen=Math.min(usable, long?60+Math.random()*45:22+Math.random()*20);
+  const railStart=startS+margin+Math.random()*(usable-railLen);
+  // sit on a lane divider, never inside a driving line
+  const slots=[1,2,3,4].map(i=>-ROAD_WIDTH/2+i*LANE_WIDTH);
+  queueRail(railStart,railStart+railLen,slots[Math.floor(Math.random()*slots.length)]);
+}
+function queueRail(sStart,sEnd,lateral,heightAbove){
+  pendingRails.push({sStart,sEnd,lateral,heightAbove:heightAbove===undefined?0.55:heightAbove});
+}
+function finalizePendingRails(){
+  for (let i=pendingRails.length-1;i>=0;i--){
+    const r=pendingRails[i];
+    if (genS<r.sEnd+3) continue;          // geometry needs the whole span sampled
+    const pts=[];
+    for (const p of pathPoints){
+      if (p.s<r.sStart-2||p.s>r.sEnd+2) continue;
+      const perpX=-Math.cos(p.heading),perpZ=Math.sin(p.heading);
+      pts.push(new THREE.Vector3(p.x+perpX*r.lateral,p.y+r.heightAbove,p.z+perpZ*r.lateral));
+    }
+    pendingRails.splice(i,1);
+    if (pts.length<2) continue;
+    const curve=new THREE.CatmullRomCurve3(pts);
+    r.mesh=new THREE.Mesh(new THREE.TubeGeometry(curve,Math.max(8,pts.length*2),0.14,6,false),railMat);
+    scene.add(r.mesh);
+    // end caps so the pop-off point reads
+    [r.sStart,r.sEnd].forEach(sv=>{
+      const w=pathToWorld(sv,r.lateral,r.heightAbove);
+      const cap=new THREE.Mesh(new THREE.BoxGeometry(0.34,0.34,0.18),
+        new THREE.MeshBasicMaterial({color:0xffe14d}));
+      cap.position.set(w.x,w.y,w.z); cap.rotation.y=w.heading;
+      scene.add(cap); (r.caps=r.caps||[]).push(cap);
+    });
+    rails.push(r);
+  }
+}
+function cleanupRails(before){
+  for (let i=rails.length-1;i>=0;i--){
+    if (rails[i].sEnd<before){
+      scene.remove(rails[i].mesh);
+      for (const c of rails[i].caps||[]) scene.remove(c);
+      rails.splice(i,1);
+    }
+  }
+}
+
+let nextTowerS=470;
+function spawnTowersAt(s){
+  const p=samplePath(s),perpX=-Math.cos(p.heading),perpZ=Math.sin(p.heading);
+  [-1,1].forEach(side=>{
+    for (let i=0,n=1+Math.floor(Math.random()*2);i<n;i++){
+      const w=12+Math.random()*14,d=12+Math.random()*16,h=6+Math.random()*26;
+      const dist=ROAD_WIDTH/2+10+Math.random()*26,jit=(Math.random()-0.5)*26;
+      const sol=addBox({x:p.x+perpX*side*dist+Math.sin(p.heading)*jit,z:p.z+perpZ*side*dist+Math.cos(p.heading)*jit,
+                        w,d,h,baseY:p.y,heading:p.heading,label:'tower',grappleable:true,
+                        color:Math.random()<0.5?0x1a1830:0x241a35,emissive:0x1a0020});
+      sol.sEnd=s+6;
+    }
+  });
+}
+function maybeSpawnTowers(a){ while(nextTowerS<a){ spawnTowersAt(nextTowerS); nextTowerS+=62+Math.random()*36; } }
+function cleanupTowers(b){
+  for (let i=solids.length-1;i>=0;i--){
+    const s=solids[i];
+    if (s.sEnd!==undefined&&s.sEnd<b){
+      scene.remove(s.mesh); if(s.lip) scene.remove(s.lip);
+      gridRemove(s); solids.splice(i,1);
+    }
+  }
+}
+
+// ===================================================================
+// TRAFFIC
+// ===================================================================
+const CAR_TYPES=[
+  {name:'REGULAR JOE',color:0xaaaaaa,speedMin:22,speedMax:28,w:2.2,h:1.3,d:4.6,aggressive:false},
+  {name:'REV HEAD',   color:0xff2fd0,speedMin:36,speedMax:46,w:2.1,h:1.1,d:4.4,aggressive:false},
+  {name:'GOV CART',   color:0x3fa9ff,speedMin:25,speedMax:30,w:2.4,h:1.5,d:5.0,aggressive:false},
+  {name:'ZAIBATSU',   color:0xff3f3f,speedMin:30,speedMax:38,w:2.3,h:1.4,d:4.8,aggressive:true },
+];
+const CAR_COUNT=40,carGeoCache={};
+function carGeo(w,h,d){ const k=w+'_'+h+'_'+d; if(!carGeoCache[k]) carGeoCache[k]=new THREE.BoxGeometry(w,h,d); return carGeoCache[k]; }
+function spawnCar(pathS){
+  const type=CAR_TYPES[Math.floor(Math.random()*CAR_TYPES.length)];
+  const mesh=new THREE.Mesh(carGeo(type.w,type.h,type.d),
+    new THREE.MeshStandardMaterial({color:type.color,emissive:type.color,emissiveIntensity:0.25,roughness:0.4,metalness:0.6}));
+  mesh.rotation.order='YXZ';
+  const lane=Math.floor(Math.random()*LANE_COUNT);
+  const glow=new THREE.PointLight(type.color,0.8,6); glow.position.y=-0.3; mesh.add(glow);
+  scene.add(mesh);
+  const speed=type.speedMin+Math.random()*(type.speedMax-type.speedMin);
+  cars.push({mesh,type,laneX:-ROAD_WIDTH/2+LANE_WIDTH*(lane+0.5),pathS,speed,baseSpeed:speed,
+             avoidSpeed:speed,weavePhase:0,isCar:true,gen:0});
+}
+for (let i=0;i<CAR_COUNT;i++) spawnCar(Math.random()*340);
+const VIEW_AHEAD=210,VIEW_BEHIND=80,SAFE_GAP=10,AVOID_ACCEL=16;
+function respawnCar(c,s){
+  const lane=Math.floor(Math.random()*LANE_COUNT);
+  c.laneX=-ROAD_WIDTH/2+LANE_WIDTH*(lane+0.5); c.pathS=s;
+  c.speed=c.baseSpeed=c.type.speedMin+Math.random()*(c.type.speedMax-c.type.speedMin);
+  c.avoidSpeed=c.speed; c.gen++;
+}
+function updateTraffic(dt){
+  for (const c of cars){
+    const held=(harp.attached&&harp.car===c)||(hitch.car===c);
+    let desired=c.baseSpeed;
+    if (!held){
+      let gap=Infinity,aheadSpeed=null;
+      for (const o of cars){
+        if (o===c||o.laneX!==c.laneX) continue;
+        const dS=o.pathS-c.pathS;
+        if (dS>0&&dS<gap){ gap=dS; aheadSpeed=o.speed; }
+      }
+      if (gap<SAFE_GAP){
+        const close=1-gap/SAFE_GAP;
+        desired=Math.max(1.5,Math.min(desired,aheadSpeed*(1-close*0.85)));
+      }
+    }
+    c.avoidSpeed=desired;
+  }
+  for (const c of cars){
+    const held=(harp.attached&&harp.car===c)||(hitch.car===c);
+    if (!held) c.speed+=clamp(c.avoidSpeed-c.speed,-AVOID_ACCEL*dt,AVOID_ACCEL*dt);
+    c.pathS+=c.speed*dt;
+    let laneX=c.laneX;
+    if (held&&c.type.aggressive){ c.weavePhase+=dt*2.4; laneX=c.laneX+Math.sin(c.weavePhase)*1.4; }
+    const half=c.type.d/2;
+    const front=pathToWorldPerp(c.pathS+half,laneX,c.type.h/2);
+    const back =pathToWorldPerp(c.pathS-half,laneX,c.type.h/2);
+    c.mesh.position.set((front.x+back.x)/2,(front.y+back.y)/2,(front.z+back.z)/2);
+    const fdx=front.x-back.x,fdy=front.y-back.y,fdz=front.z-back.z;
+    c.mesh.rotation.y=Math.atan2(fdx,fdz);
+    c.mesh.rotation.x=-Math.atan2(fdy,Math.hypot(fdx,fdz)||1e-6);
+    if (!held){
+      const rel=c.pathS-st.pathS;
+      if (rel>VIEW_AHEAD) respawnCar(c,st.pathS-(40+Math.random()*80));
+      else if (rel<-VIEW_BEHIND) respawnCar(c,st.pathS+(120+Math.random()*110));
+    }
+  }
+}
+function carVelocity(c,out){
+  const p=samplePath(c.pathS),cp=Math.cos(p.pitch);
+  return out.set(Math.sin(p.heading)*cp,Math.sin(p.pitch),Math.cos(p.heading)*cp).multiplyScalar(c.speed);
+}
+
+// ===================================================================
+// PLAYER RIG
+// ===================================================================
+const player=new THREE.Group(); player.rotation.order='YXZ';
+const board=new THREE.Mesh(new THREE.BoxGeometry(0.6,0.12,1.8),
+  new THREE.MeshStandardMaterial({color:0x1c1c26,emissive:0xff2fd0,emissiveIntensity:0.45}));
+board.position.y=0.15; player.add(board);
+// The rider sits in its own group so a stance switch can turn the person
+// without touching the deck. The deck is symmetric anyway, so re-aiming yaw
+// leaves it visually unchanged — this is what makes the turn read.
+const rider=new THREE.Group(); player.add(rider);
+const torso=new THREE.Mesh(new THREE.CylinderGeometry(0.32,0.32,0.9,8),
+  new THREE.MeshStandardMaterial({color:0x2b2440,roughness:0.5}));
+torso.position.y=1.05; rider.add(torso);
+const head=new THREE.Mesh(new THREE.SphereGeometry(0.24,12,12),new THREE.MeshStandardMaterial({color:0xffcf9e}));
+head.position.y=1.75; rider.add(head);
+const visor=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.12,0.1),new THREE.MeshBasicMaterial({color:0x00ffe1}));
+visor.position.set(0,1.78,0.2); rider.add(visor);
+player.add(new THREE.PointLight(0xff2fd0,1.5,8));
+scene.add(player);
+const fill=new THREE.PointLight(0xff2fd0,1.1,320); scene.add(fill);
+const grazeLight=new THREE.PointLight(0xffc040,0,7); scene.add(grazeLight);
+
+// the arm reaching to the bodywork while hitched — sells the grab
+const armGeo=new THREE.CylinderGeometry(0.075,0.075,1,6);
+armGeo.translate(0,0.5,0);
+const gripArm=new THREE.Mesh(armGeo,new THREE.MeshStandardMaterial({
+  color:0xffcf9e,emissive:0x3a1e00,emissiveIntensity:0.5,roughness:0.6}));
+gripArm.visible=false; scene.add(gripArm);
+
+// ring on the spot you'd take hold of, so the eligibility window is visible
+// in the world rather than only as HUD text
+const grabRing=new THREE.Mesh(new THREE.RingGeometry(0.42,0.55,24),
+  new THREE.MeshBasicMaterial({color:0x00ffe1,transparent:true,opacity:0.8,side:THREE.DoubleSide,depthTest:false}));
+grabRing.rotation.x=-Math.PI/2; grabRing.renderOrder=997; grabRing.visible=false; scene.add(grabRing);
+
+const vel=new V3();
+const st={grounded:true,yaw:Math.PI,pathS:0,lateralX:0,
+  surfaceId:'road',surfaceY:0,surfacePitch:0,onCar:null,
+  airTime:0,takeoffY:0,peakRise:0,lastImpact:null,travelPitch:0,roll:0,
+  lastContact:null,turnInput:0,surfaceNormal:new V3(0,1,0),
+  braking:false,drifting:false,footBrake:false,tailDrag:false,brakeLevel:0,
+  grinding:false,rail:null,railS:0,railSpeed:0,grindStance:0,
+  kickflipping:false,kickflipT:0,hardflipping:false,hardflipT:0,
+  shoveitting:false,shoveitT:0,darksiding:false,darksideT:0,
+  trickUsed:false,darksideUsed:false,fromBounce:false,fromRailPop:false,
+  flip:0,flipVis:0,spinStart:0,spinTotal:0,
+  riderSpin:0,flipArmed:false,flipNeed:0};
+
+// ===================================================================
+// HITCH MODE
+// ===================================================================
+//
+// Not a physics state — a parameterisation. While hitched the player is a
+// point on the car's perimeter, addressed by arc length u:
+//
+//     u=0 ─ front-right, back along the RIGHT flank
+//     u=d ─ rear-right corner, across the REAR
+//     u=d+w ─ rear-left corner, forward along the LEFT flank
+//     u=2d+w ─ front-left
+//
+// The front edge is deliberately not reachable — you can't hold the bonnet
+// of a car that's dragging you.
+const hitch={car:null,gen:0,u:0,face:'rear',slide:0,candidate:null,nearest:null};
+const _hn=new V3(),_hw=new V3(),_hw2=new V3(),_hbody=new V3(),_hcv=new V3(),_hrel=new V3();
+
+function hitchPerimeter(c){ return c.type.d*2+c.type.w; }
+function hitchLocalFromU(c,u){
+  const d=c.type.d,w=c.type.w,hd=d/2,hw=w/2;
+  u=clamp(u,0,hitchPerimeter(c));
+  if (u<=d)   return {lf:hd-u,        lr:hw,       face:'right'};
+  if (u<=d+w) return {lf:-hd,         lr:hw-(u-d), face:'rear'};
+  return             {lf:-hd+(u-d-w), lr:-hw,      face:'left'};
+}
+function hitchNormal(c,face,out){
+  const h=c.mesh.rotation.y,fx=Math.sin(h),fz=Math.cos(h),rx=Math.cos(h),rz=-Math.sin(h);
+  if (face==='right') return out.set(rx,0,rz);
+  if (face==='left')  return out.set(-rx,0,-rz);
+  return out.set(-fx,0,-fz);
+}
+// world stand position for a given u, pushed clear of the panel by standoff
+function hitchWorld(c,u,standoff,out,bodyOut){
+  const L=hitchLocalFromU(c,u);
+  const h=c.mesh.rotation.y,fx=Math.sin(h),fz=Math.cos(h),rx=Math.cos(h),rz=-Math.sin(h);
+  hitchNormal(c,L.face,_hn);
+  const bx=c.mesh.position.x+fx*L.lf+rx*L.lr;
+  const bz=c.mesh.position.z+fz*L.lf+rz*L.lr;
+  if (bodyOut) bodyOut.set(bx,c.mesh.position.y+c.type.h*0.2,bz);
+  out.set(bx+_hn.x*standoff,0,bz+_hn.z*standoff);
+  return L;
+}
+function nearestPerimeterU(c,pos){
+  const L=hitchPerimeter(c);
+  let bestU=0,bestD=Infinity;
+  for (let i=0;i<=32;i++){
+    const u=L*i/32;
+    hitchWorld(c,u,g('hitchStandoff'),_hw2);
+    const dx=pos.x-_hw2.x,dz=pos.z-_hw2.z,d=dx*dx+dz*dz;
+    if (d<bestD){ bestD=d; bestU=u; }
+  }
+  return {u:bestU,dist:Math.sqrt(bestD)};
+}
+
+// Eligibility is purely physical now: are you alongside the car, and are you
+// travelling with it? The harpoon is one way to arrive in that window, not a
+// requirement. Scanned once per frame so the HUD and the F key share the work.
+function scanHitch(){
+  hitch.candidate=null; hitch.nearest=null;
+  if (hitch.car) return;
+  for (const c of cars){
+    if (Math.abs(c.pathS-st.pathS)>25) continue;
+    const near=nearestPerimeterU(c,player.position);
+    carVelocity(c,_hcv);
+    const relSp=_hrel.copy(vel).sub(_hcv).length();
+    const dy=Math.abs(player.position.y-(c.mesh.position.y-c.type.h/2));
+    const info={car:c,u:near.u,dist:near.dist,relSp,dy};
+    if (!hitch.nearest||near.dist<hitch.nearest.dist) hitch.nearest=info;
+    if (near.dist<=g('hitchReach') && dy<=g('hitchHeightWin') && relSp*KMH<=g('hitchSpeedWin')){
+      const score=near.dist+relSp*0.2;
+      if (!hitch.candidate||score<hitch.candidate.score) hitch.candidate=Object.assign({score},info);
+    }
+  }
+}
+function hitchRefusal(){
+  const n=hitch.nearest;
+  if (!n) return 'NO CAR NEARBY';
+  if (n.dist>g('hitchReach')) return 'GET ALONGSIDE';
+  if (n.dy>g('hitchHeightWin')) return 'WRONG HEIGHT';
+  return 'TOO FAST — '+Math.round(n.relSp*KMH)+' KM/H OFF';
+}
+function tryHitch(){
+  if (hitch.car){ releaseHitch(false,'UNHITCHED'); return; }
+  const cand=hitch.candidate;
+  if (!cand){ flashBanner(hitchRefusal(),480); return; }
+  if (harp.attached) detach(true);      // stow the rope if it happens to be out
+  hitch.car=cand.car; hitch.gen=cand.car.gen; hitch.u=cand.u;
+  hitch.face=hitchLocalFromU(cand.car,cand.u).face;
+  flashBanner('HITCHED — '+cand.car.type.name,600);
+}
+function releaseHitch(withOllie,label){
+  if (!hitch.car) return;
+  const c=hitch.car;
+  carVelocity(c,_cv);
+  vel.copy(_cv);                       // you leave with the car's momentum
+  hitchNormal(c,hitch.face,_hn);
+  vel.addScaledVector(_hn,g('hitchPushOff'));
+  if (withOllie){
+    vel.y+=g('ollie');
+    st.grounded=false; st.airTime=0; st.takeoffY=player.position.y; st.peakRise=0;
+    trailPoints.length=0;
+  }
+  hitch.car=null; gripArm.visible=false;
+  flashBanner(label,520);
+}
+let hitchSparkAccum=0;
+function updateHitchMode(dt){
+  const c=hitch.car;
+  if (cars.indexOf(c)===-1||c.gen!==hitch.gen){ releaseHitch(false,'LOST GRIP'); return; }
+
+  hitch.slide=0;
+  if (keys['KeyA']) hitch.slide-=1;
+  if (keys['KeyD']) hitch.slide+=1;
+  hitch.u=clamp(hitch.u+hitch.slide*g('hitchSlide')*dt,0,hitchPerimeter(c));
+
+  const L=hitchWorld(c,hitch.u,g('hitchStandoff'),_hw,_hbody);
+  hitch.face=L.face;
+  const ground=sampleGround(_hw.x,_hw.z,player.position.y+1.2);
+  player.position.set(_hw.x, ground.y===-Infinity?player.position.y:ground.y, _hw.z);
+  st.surfaceId=ground.id; st.surfaceY=ground.y; st.surfacePitch=ground.pitch;
+  st.surfaceNormal.copy(normalOf(ground));
+  st.grounded=true; st.onCar=null; st.airTime=0;
+
+  carVelocity(c,_cv);
+  vel.copy(_cv);
+  st.yaw=c.mesh.rotation.y;
+
+  // sparks trail off the board while you shuffle around the bodywork
+  if (Math.abs(hitch.slide)>0){
+    hitchSparkAccum+=dt*Math.max(0.001,g('sparkRate'));
+    while (hitchSparkAccum>0.03){
+      hitchNormal(c,hitch.face,_hn);
+      _contact.copy(player.position).addScaledVector(_hn,-0.25); _contact.y+=0.2;
+      _tangV.set(-Math.sin(st.yaw),0,-Math.cos(st.yaw));
+      emitContactSpark(_contact,_tangV,_hn,6);
+      hitchSparkAccum-=0.03;
+    }
+  }
+
+  if (keys['Space']) releaseHitch(true,'KICKED OFF');
+  else if (keys['KeyQ']) releaseHitch(false,'LET GO');
+  else if (c.type.aggressive&&Math.random()<0.0035) releaseHitch(false,'SHAKEN OFF');
+}
+function updateGripArm(){
+  if (!hitch.car){ gripArm.visible=false; return; }
+  hitchWorld(hitch.car,hitch.u,g('hitchStandoff'),_hw,_hbody);
+  const shoulder=_tmpB.copy(player.position).add(_sv.set(0,1.15,0));
+  gripArm.visible=true;
+  gripArm.position.copy(shoulder);
+  const d=_tmpA.subVectors(_hbody,shoulder).length();
+  gripArm.scale.set(1,Math.max(0.001,d),1);
+  if (d>1e-4){ _tmpA.normalize(); gripArm.quaternion.setFromUnitVectors(UP,_tmpA); }
+}
+function updateGrabRing(){
+  const cand=hitch.candidate;
+  if (hitch.car||!cand){ grabRing.visible=false; return; }
+  hitchWorld(cand.car,cand.u,g('hitchStandoff'),_hw);
+  const ground=sampleGround(_hw.x,_hw.z,player.position.y+1.2);
+  grabRing.visible=true;
+  grabRing.position.set(_hw.x,(ground.y===-Infinity?player.position.y:ground.y)+0.06,_hw.z);
+  grabRing.scale.setScalar(1+Math.sin(performance.now()*0.008)*0.12);
+}
+
+// ===================================================================
+// HARPOON + HULL-WRAPPING ROPE
+// ===================================================================
+const MAX_WRAPS=8;
+// The rope doesn't care what it's tied to — it's an inextensible pull-only
+// constraint on the velocity body. A car anchor moves and carries a frame
+// velocity; a static anchor sits still. Everything downstream reads
+// anchorWorld()/anchorFrameVel() rather than harp.car, so a fixed point
+// overhead produces a pendulum through exactly the same code path.
+const harp={attached:false,car:null,anchorType:'none',anchorSolid:null,anchorPt:new V3(),
+  firing:false,fireT:0,fireTarget:null,
+  ropeLen:8,minLen:2.5,maxLen:45,lenCap:45,heat:0,reeling:false,swing:0,taut:false,liveLen:0,
+  pivots:[],wrapCount:0,unwrapCount:0};
+const _anchorVel=new V3();
+function anchorWorld(out){
+  if (harp.anchorType==='car') return carAttachPoint(harp.car,out);
+  return out.copy(harp.anchorPt);
+}
+function anchorFrameVel(out){
+  // the frame a pivot rides in is its own car's, not the anchor's
+  if (harp.pivots.length) return carVelocity(harp.pivots[harp.pivots.length-1].car,out);
+  if (harp.anchorType==='car') return carVelocity(harp.car,out);
+  return out.set(0,0,0);
+}
+function anchorAlive(){
+  if (harp.anchorType==='car') return cars.indexOf(harp.car)!==-1;
+  if (harp.anchorType==='static') return solids.indexOf(harp.anchorSolid)!==-1;
+  return false;
+}
+const FIRE_DURATION=0.16;
+const cableGeo=new THREE.CylinderGeometry(0.045,0.045,1,6);
+cableGeo.translate(0,0.5,0);
+const cableMat=new THREE.MeshStandardMaterial({color:0xff2fd0,emissive:0xff2fd0,
+  emissiveIntensity:0.6,metalness:0.8,roughness:0.3});
+const ROPE_PINK=new THREE.Color(0xff2fd0),ROPE_YELLOW=new THREE.Color(0xffe14d),
+      ROPE_BLUE=new THREE.Color(0x3fa9ff),ROPE_GREEN=new THREE.Color(0x66ff9c);
+const ropeSegs=[];
+function ropeSegment(i){
+  while (ropeSegs.length<=i){
+    const m=new THREE.Mesh(cableGeo,cableMat);
+    m.visible=false; scene.add(m); ropeSegs.push(m);
+  }
+  return ropeSegs[i];
+}
+function placeSegment(mesh,from,to){
+  mesh.visible=true; mesh.position.copy(from);
+  const d=_tmpA.subVectors(to,from).length();
+  mesh.scale.set(1,Math.max(0.001,d),1);
+  if (d>1e-4){ _tmpA.normalize(); mesh.quaternion.setFromUnitVectors(UP,_tmpA); }
+}
+function hideSegmentsFrom(i){ for (let k=i;k<ropeSegs.length;k++) ropeSegs[k].visible=false; }
+const pivotDots=[];
+function pivotDot(i){
+  while (pivotDots.length<=i){
+    const m=new THREE.Mesh(new THREE.SphereGeometry(0.13,8,8),
+      new THREE.MeshBasicMaterial({color:0xffe14d,depthTest:false}));
+    m.renderOrder=998; m.visible=false; scene.add(m); pivotDots.push(m);
+  }
+  return pivotDots[i];
+}
+const harpoonHead=new THREE.Mesh(new THREE.ConeGeometry(0.16,0.55,6),
+  new THREE.MeshStandardMaterial({color:0xff2fd0,emissive:0xff2fd0,emissiveIntensity:0.9,metalness:0.7,roughness:0.25}));
+harpoonHead.visible=false; scene.add(harpoonHead);
+const targetRing=new THREE.Mesh(new THREE.RingGeometry(0.16,0.23,28),
+  new THREE.MeshBasicMaterial({color:0x00c8ff,transparent:true,opacity:0.9,side:THREE.DoubleSide,depthTest:false}));
+targetRing.renderOrder=999; targetRing.visible=false; scene.add(targetRing);
+let ringBreathe=0, reelSparkAccum=0, brakeSparkAccum=0;
+const _sparkDir=new V3(), _brakePt=new V3();
+const _attach=new V3(),_shoulder=new V3(),_carVel=new V3(),_tmpA=new V3(),_tmpB=new V3();
+function carAttachPoint(c,out){
+  const h=c.mesh.rotation.y;
+  return out.set(c.mesh.position.x-Math.sin(h)*(c.type.d/2),
+                 c.mesh.position.y+c.type.h*0.15,
+                 c.mesh.position.z-Math.cos(h)*(c.type.d/2));
+}
+function cross2(ax,az,bx,bz){ return ax*bz-az*bx; }
+function segsIntersect(ax,az,bx,bz,cx,cz,dx,dz){
+  const d1=cross2(dx-cx,dz-cz,ax-cx,az-cz);
+  const d2=cross2(dx-cx,dz-cz,bx-cx,bz-cz);
+  const d3=cross2(bx-ax,bz-az,cx-ax,cz-az);
+  const d4=cross2(bx-ax,bz-az,dx-ax,dz-az);
+  return ((d1>0&&d2<0)||(d1<0&&d2>0))&&((d3>0&&d4<0)||(d3<0&&d4>0));
+}
+const CORNER_SIGNS=[[1,1],[1,-1],[-1,-1],[-1,1]];
+const _cornersA=[{},{},{},{}],_cornersB=[{},{},{},{}];
+function carCorners(c,inset,out){
+  const h=c.mesh.rotation.y,fx=Math.sin(h),fz=Math.cos(h),rx=Math.cos(h),rz=-Math.sin(h);
+  const hd=c.type.d/2+inset,hw=c.type.w/2+inset;
+  for (let i=0;i<4;i++){
+    const lf=CORNER_SIGNS[i][0]*hd,lr=CORNER_SIGNS[i][1]*hw;
+    out[i].lf=lf; out[i].lr=lr; out[i].idx=i;
+    out[i].x=c.mesh.position.x+fx*lf+rx*lr;
+    out[i].z=c.mesh.position.z+fz*lf+rz*lr;
+  }
+  return out;
+}
+function pivotWorld(p,out){
+  const c=p.car,h=c.mesh.rotation.y;
+  const fx=Math.sin(h),fz=Math.cos(h),rx=Math.cos(h),rz=-Math.sin(h);
+  return out.set(c.mesh.position.x+fx*p.lf+rx*p.lr,
+                 c.mesh.position.y+c.type.h*0.45,
+                 c.mesh.position.z+fz*p.lf+rz*p.lr);
+}
+function carBlocksRope(c,yA,yB){
+  return Math.min(yA,yB)<c.mesh.position.y+c.type.h/2+g('ropeHeightPad');
+}
+function pivotsValid(){
+  for (let i=0;i<harp.pivots.length;i++){
+    const p=harp.pivots[i];
+    if (cars.indexOf(p.car)===-1||p.car.gen!==p.gen){
+      harp.unwrapCount+=harp.pivots.length-i;
+      harp.pivots.length=i; return;
+    }
+  }
+}
+const _liveAnchor=new V3(),_pA=new V3(),_pB=new V3();
+function liveAnchor(out){
+  if (harp.pivots.length) return pivotWorld(harp.pivots[harp.pivots.length-1],out);
+  return anchorWorld(out);
+}
+function frozenLength(){
+  if (!harp.pivots.length) return 0;
+  let total=0;
+  anchorWorld(_pA);
+  for (let i=0;i<harp.pivots.length;i++){
+    pivotWorld(harp.pivots[i],_pB);
+    total+=_pA.distanceTo(_pB); _pA.copy(_pB);
+  }
+  return total;
+}
+function advanceHull(sinHyst,inset){
+  const p=harp.pivots[harp.pivots.length-1];
+  pivotWorld(p,_pA);
+  if (!carBlocksRope(p.car,_pA.y,_pB.y)) return false;
+  const cs=carCorners(p.car,inset,_cornersA);
+  const j=(p.cornerIdx+(p.side>0?1:3))%4;
+  const Ci=cs[p.cornerIdx],Cj=cs[j];
+  let ex=Cj.x-Ci.x,ez=Cj.z-Ci.z,vx=_pB.x-Ci.x,vz=_pB.z-Ci.z;
+  const el=Math.hypot(ex,ez)||1e-6,vl=Math.hypot(vx,vz)||1e-6;
+  if (cross2(ex/el,ez/el,vx/vl,vz/vl)*p.side>sinHyst){
+    harp.pivots.push({car:p.car,gen:p.car.gen,cornerIdx:j,lf:Cj.lf,lr:Cj.lr,side:p.side});
+    harp.wrapCount++; return true;
+  }
+  return false;
+}
+function wrapFromAnchor(sinHyst,inset){
+  const c=harp.car;
+  carAttachPoint(c,_pA);
+  if (!carBlocksRope(c,_pA.y,_pB.y)) return false;
+  const h=c.mesh.rotation.y,fx=Math.sin(h),fz=Math.cos(h),rx=Math.cos(h),rz=-Math.sin(h);
+  const dx=_pB.x-c.mesh.position.x,dz=_pB.z-c.mesh.position.z;
+  const lf=dx*fx+dz*fz,lr=dx*rx+dz*rz;
+  const hd=c.type.d/2+inset;
+  if (lf<=-hd+sinHyst*c.type.d*0.5) return false;
+  const cs=carCorners(c,inset,_cornersA);
+  const idx=lr>=0?3:2;
+  const C=cs[idx];
+  const ux=C.x-_pA.x,uz=C.z-_pA.z,vx=_pB.x-C.x,vz=_pB.z-C.z;
+  const ul=Math.hypot(ux,uz)||1e-6,vl=Math.hypot(vx,vz)||1e-6;
+  const turn=cross2(ux/ul,uz/ul,vx/vl,vz/vl);
+  harp.pivots.push({car:c,gen:c.gen,cornerIdx:idx,lf:C.lf,lr:C.lr,side:Math.sign(turn)||(lr>=0?1:-1)});
+  harp.wrapCount++; return true;
+}
+function wrapNewCar(inset,excludeCar){
+  const ax=_pA.x,az=_pA.z,bx=_pB.x,bz=_pB.z;
+  const ux=bx-ax,uz=bz-az,uLen=Math.hypot(ux,uz);
+  if (uLen<0.3) return false;
+  const nx=ux/uLen,nz=uz/uLen;
+  for (const c of cars){
+    if (c===excludeCar) continue;
+    if (Math.abs(c.pathS-st.pathS)>45) continue;
+    if (!carBlocksRope(c,_pA.y,_pB.y)) continue;
+    const cs=carCorners(c,inset,_cornersB);
+    let blocked=false;
+    for (let i=0;i<4&&!blocked;i++){
+      const a=cs[i],b=cs[(i+1)%4];
+      if (segsIntersect(ax,az,bx,bz,a.x,a.z,b.x,b.z)) blocked=true;
+    }
+    if (!blocked) continue;
+    let bestPos=null,bestPosD=-Infinity,bestNeg=null,bestNegD=Infinity;
+    for (let i=0;i<4;i++){
+      const d=cross2(nx,nz,cs[i].x-ax,cs[i].z-az);
+      if (d>bestPosD){ bestPosD=d; bestPos=i; }
+      if (d<bestNegD){ bestNegD=d; bestNeg=i; }
+    }
+    let idx,dSel;
+    if (bestPosD<=0){ idx=bestNeg; dSel=bestNegD; }
+    else if (bestNegD>=0){ idx=bestPos; dSel=bestPosD; }
+    else if (bestPosD<=-bestNegD){ idx=bestPos; dSel=bestPosD; }
+    else { idx=bestNeg; dSel=bestNegD; }
+    const C=cs[idx];
+    const u1x=C.x-ax,u1z=C.z-az,v1x=bx-C.x,v1z=bz-C.z;
+    const ul=Math.hypot(u1x,u1z)||1e-6,vl=Math.hypot(v1x,v1z)||1e-6;
+    const turn=cross2(u1x/ul,u1z/ul,v1x/vl,v1z/vl);
+    harp.pivots.push({car:c,gen:c.gen,cornerIdx:idx,lf:C.lf,lr:C.lr,side:Math.sign(turn)||-Math.sign(dSel)||1});
+    harp.wrapCount++; return true;
+  }
+  return false;
+}
+function tryWrap(){
+  if (!opts.wrap||harp.pivots.length>=MAX_WRAPS) return;
+  _pB.copy(player.position).add(_tmpB.set(0,1.1,0));
+  const sinHyst=Math.sin(g('wrapHyst')*Math.PI/180),inset=g('cornerInset');
+  if (harp.pivots.length){ if (advanceHull(sinHyst,inset)) return; }
+  else { if (wrapFromAnchor(sinHyst,inset)) return; }
+  liveAnchor(_pA);
+  wrapNewCar(inset,harp.pivots.length?harp.pivots[harp.pivots.length-1].car:harp.car);
+}
+function tryUnwrap(){
+  const sinHyst=Math.sin(g('wrapHyst')*Math.PI/180);
+  _pB.copy(player.position).add(_tmpB.set(0,1.1,0));
+  while (harp.pivots.length){
+    const n=harp.pivots.length-1,p=harp.pivots[n];
+    pivotWorld(p,_liveAnchor);
+    if (n>0) pivotWorld(harp.pivots[n-1],_pA); else anchorWorld(_pA);
+    let ux=_liveAnchor.x-_pA.x,uz=_liveAnchor.z-_pA.z;
+    let vx=_pB.x-_liveAnchor.x,vz=_pB.z-_liveAnchor.z;
+    const ul=Math.hypot(ux,uz)||1e-6,vl=Math.hypot(vx,vz)||1e-6;
+    ux/=ul; uz/=ul; vx/=vl; vz/=vl;
+    if (cross2(ux,uz,vx,vz)*p.side<-sinHyst){ harp.pivots.pop(); harp.unwrapCount++; continue; }
+    break;
+  }
+}
+function fireHarpoon(){
+  if (hitch.car){ flashBanner('LET GO FIRST',400); return; }
+  if (harp.attached||harp.firing) return;
+  const t=getHoveredTarget();
+  if (!t){ flashBanner('NO TARGET',400); return; }
+  harp.firing=true; harp.fireT=0; harp.fireTarget=t; harpoonHead.visible=true;
+}
+function attachTo(target){
+  harp.attached=true; harp.firing=false; harp.pivots.length=0;
+  _shoulder.copy(player.position).add(new V3(0,1.1,0));
+  if (target.type==='car'){
+    harp.anchorType='car'; harp.car=target.car; harp.anchorSolid=null;
+    carAttachPoint(target.car,_attach);
+    flashBanner('HOOKED — '+target.car.type.name,500);
+  } else {
+    harp.anchorType='static'; harp.car=null; harp.anchorSolid=target.solid;
+    harp.anchorPt.copy(target.point);
+    _attach.copy(harp.anchorPt);
+    flashBanner('ANCHORED — '+target.solid.label.toUpperCase(),500);
+  }
+  harp.ropeLen=clamp(_shoulder.distanceTo(_attach),harp.minLen,harp.maxLen);
+  // a static line can only ever be shortened — the length you bit at is the
+  // ceiling for that attachment, so reeling in is a one-way commitment
+  harp.lenCap=harp.anchorType==='static'?harp.ropeLen:harp.maxLen;
+}
+function detach(silent){
+  if (!harp.attached) return;
+  const exit=vel.length();
+  harp.attached=false; harp.car=null; harp.reeling=false; harp.taut=false; harp.lenCap=harp.maxLen;
+  harp.pivots.length=0; hideSegmentsFrom(0);
+  for (const d of pivotDots) d.visible=false;
+  harpoonHead.visible=false; targetRing.visible=false;
+  if (!silent) flashBanner('RELEASED — '+(exit*3.2).toFixed(0)+' KM/H',600);
+}
+function applyRopeConstraint(dt){
+  if (!harp.attached) return;
+  if (!anchorAlive()){ detach(true); return; }
+  // hull wrapping is car-specific — a static anchor has no moving silhouette
+  // to walk around, so it simply never accumulates pivots
+  if (harp.anchorType==='car'){ pivotsValid(); tryUnwrap(); tryWrap(); }
+  const stat=harp.anchorType==='static';
+  _shoulder.copy(player.position).add(_tmpB.set(0,1.1,0));
+  liveAnchor(_liveAnchor);
+  let frozen=frozenLength(),live=harp.ropeLen-frozen;
+  while (live<g('minLiveLen')&&harp.pivots.length){
+    harp.pivots.pop(); harp.unwrapCount++;
+    frozen=frozenLength(); live=harp.ropeLen-frozen;
+    liveAnchor(_liveAnchor);
+  }
+  live=Math.max(g('minLiveLen'),live);
+  anchorFrameVel(_carVel);
+  const toAnchor=_tmpA.subVectors(_liveAnchor,_shoulder);
+  const dist=toAnchor.length();
+  harp.taut=dist>=live-0.02;
+  if (dist>live&&dist>1e-4){
+    const dir=toAnchor.clone().divideScalar(dist);
+    player.position.addScaledVector(dir,dist-live);
+    const rel=vel.clone().sub(_carVel);
+    const outward=rel.dot(dir);
+    if (outward<0){
+      const before=rel.length();
+      rel.addScaledVector(dir,-outward);
+      if (stat){
+        // An ideal rope does no work. Deleting the radial component was
+        // eating most of your speed on the catch — at a shallow approach
+        // that component IS your speed. Redirect the magnitude into the
+        // tangential direction instead, and momentum becomes the swing.
+        if (rel.lengthSq()>1e-6) rel.setLength(before*g('swingRetain'));
+      } else {
+        rel.multiplyScalar(1-clamp(g('ropeDamp'),0,1)*0.5);
+      }
+      vel.copy(rel).add(_carVel);
+    }
+  }
+  harp.reeling=!!keys['KeyW'];
+  const reelMult=stat?g('swingReelMult'):1;
+  if (keys['KeyW']){
+    harp.ropeLen-=g('reelRate')*reelMult*dt;
+    // shortening an overhead tether is what actually spins a pendulum up, so
+    // the pull toward the anchor wants to be gentler than a car's tow-in
+    if (dist>1e-4) vel.addScaledVector(toAnchor.clone().divideScalar(dist),
+                                       (stat?g('swingReelAccel'):g('reelAccel'))*dt);
+  }
+  if (keys['KeyS']) harp.ropeLen+=g('reelRate')*0.8*dt;
+  harp.ropeLen=clamp(harp.ropeLen,harp.minLen+frozen,Math.min(harp.maxLen,harp.lenCap));
+  harp.liveLen=live;
+  // a pendulum shows energy injection from the positional correction far more
+  // plainly than a tow does — a touch of drag while taut keeps it honest
+  if (stat&&harp.taut&&g('swingDamp')>0) vel.multiplyScalar(Math.max(0,1-g('swingDamp')*dt));
+  const rel2=vel.clone().sub(_carVel);
+  const dir2=dist>1e-4?toAnchor.clone().divideScalar(dist):new V3(0,1,0);
+  harp.swing=rel2.addScaledVector(dir2,-rel2.dot(dir2)).length();
+  if (keys['KeyQ']) detach(false);
+  if (harp.attached&&harp.anchorType==='car'&&harp.car.type.aggressive&&Math.random()<0.0022){
+    flashBanner('BUCKED OFF!',500); detach(true);
+  }
+}
+function updateHeat(dt){
+  const onGov=harp.attached&&harp.car&&harp.car.type.name==='GOV CART';
+  // hitching stows the harpoon entirely, so it always cools while you ride
+  if (harp.reeling&&harp.attached&&!onGov) harp.heat=Math.min(1,harp.heat+g('heatFill')*dt);
+  else harp.heat=Math.max(0,harp.heat-(hitch.car?0.3:0.16)*dt);
+  if (harp.attached&&harp.heat>=1){ flashBanner('HARPOON OVERHEATED',600); detach(true); harp.heat=0.85; }
+  const el=document.getElementById('heatFill');
+  el.style.width=(harp.heat*100).toFixed(1)+'%';
+  el.style.background=hitch.car?'#00ffe1':onGov?'#3fa9ff':harp.heat>0.8?'#ff3030':'#ffe14d';
+}
+function updateHarpoonVisuals(dt){
+  _shoulder.copy(player.position).add(_tmpB.set(0,1.1,0));
+  if (harp.firing){
+    const t=harp.fireTarget;
+    const gone = t.type==='car' ? cars.indexOf(t.car)===-1 : solids.indexOf(t.solid)===-1;
+    if (gone){ harp.firing=false; harpoonHead.visible=false; hideSegmentsFrom(0); return; }
+    if (t.type==='car') carAttachPoint(t.car,_attach); else _attach.copy(t.point);
+    harp.fireT+=dt/FIRE_DURATION;
+    const f=Math.min(1,harp.fireT);
+    harpoonHead.position.lerpVectors(_shoulder,_attach,f);
+    harpoonHead.lookAt(_attach);
+    placeSegment(ropeSegment(0),_shoulder,harpoonHead.position);
+    hideSegmentsFrom(1);
+    if (f>=1) attachTo(t);
+    return;
+  }
+  if (harp.attached){
+    anchorWorld(_attach);
+    harpoonHead.position.copy(_attach); harpoonHead.lookAt(_shoulder); harpoonHead.visible=true;
+    targetRing.visible=true; targetRing.position.copy(_attach); targetRing.lookAt(_shoulder);
+    ringBreathe+=dt*1.6; targetRing.scale.setScalar(1+Math.sin(ringBreathe)*0.18);
+    const chain=[_attach.clone()];
+    for (const p of harp.pivots) chain.push(pivotWorld(p,new V3()));
+    chain.push(_shoulder.clone());
+    for (let i=0;i<chain.length-1;i++) placeSegment(ropeSegment(i),chain[i],chain[i+1]);
+    hideSegmentsFrom(chain.length-1);
+    for (let i=0;i<pivotDots.length;i++) pivotDots[i].visible=false;
+    for (let i=0;i<harp.pivots.length;i++){
+      const d=pivotDot(i); d.visible=true; d.position.copy(chain[i+1]);
+    }
+    // a static line reads green so you can tell at a glance which rope you're on
+    if (harp.anchorType==='static'){
+      const flash=(Math.sin(performance.now()*0.018)+1)/2;
+      cableMat.color.copy(ROPE_GREEN).lerp(ROPE_YELLOW,harp.reeling?flash:0);
+      targetRing.material.color.copy(ROPE_GREEN);
+    } else {
+      const onGov=harp.car&&harp.car.type.name==='GOV CART';
+      const flash=(Math.sin(performance.now()*(onGov?0.015:0.02))+1)/2;
+      const tint=onGov?ROPE_BLUE:harp.reeling?ROPE_YELLOW:ROPE_PINK;
+      cableMat.color.copy(ROPE_PINK).lerp(tint,(onGov||harp.reeling)?flash:0);
+      targetRing.material.color.setHex(0x00c8ff);
+    }
+    cableMat.emissive.copy(cableMat.color);
+    cableMat.emissiveIntensity=harp.taut?0.9:0.25;
+
+    // winch sparks at the mount on the player's shoulder, thrown back down
+    // the line away from the anchor
+    if (harp.reeling){
+      reelSparkAccum+=dt*Math.max(0.001,g('sparkRate'));
+      const step=0.022;
+      while (reelSparkAccum>step){
+        _sparkDir.subVectors(_shoulder,_attach);
+        if (_sparkDir.lengthSq()<1e-6) _sparkDir.set(0,1,0); else _sparkDir.normalize();
+        emitRopeSpark(_shoulder,_sparkDir,4.5+vel.length()*0.10);
+        reelSparkAccum-=step;
+      }
+    } else reelSparkAccum=0;
+  } else {
+    harpoonHead.visible=false; targetRing.visible=false; ringBreathe=0;
+    hideSegmentsFrom(0);
+    for (const d of pivotDots) d.visible=false;
+  }
+}
+
+// ===================================================================
+// INPUT
+// ===================================================================
+const keys={};
+const mouseNDC=new THREE.Vector2(0,0);
+const raycaster=new THREE.Raycaster();
+const MAX_TARGET_RANGE=55;
+// grappleable solid meshes are cached because the list only changes when the
+// world streams, not per frame
+let grappleMeshes=[],grappleStamp=-1;
+function grappleTargets(){
+  if (grappleStamp!==solids.length){
+    grappleMeshes=solids.filter(s=>s.grappleable).map(s=>s.mesh);
+    grappleStamp=solids.length;
+  }
+  return grappleMeshes;
+}
+const _hitTargets=[];
+function getHoveredTarget(){
+  raycaster.setFromCamera(mouseNDC,camera);
+  _hitTargets.length=0;
+  for (const c of cars) _hitTargets.push(c.mesh);
+  for (const m of grappleTargets()) _hitTargets.push(m);
+  const hits=raycaster.intersectObjects(_hitTargets,false);
+  if (!hits.length||hits[0].distance>MAX_TARGET_RANGE) return null;
+  const obj=hits[0].object;
+  const car=cars.find(c=>c.mesh===obj);
+  if (car) return {type:'car',car};
+  const sol=solids.find(x=>x.mesh===obj);
+  if (sol) return {type:'static',solid:sol,point:hits[0].point.clone()};
+  return null;
+}
+addEventListener('keydown',e=>{
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  const wasDown=keys[e.code];
+  keys[e.code]=true;
+  switch(e.code){
+    case 'KeyF': if(!wasDown) tryHitch(); break;
+    case 'KeyV': opts.speedFX=!opts.speedFX; syncToggles();
+                 flashBanner(opts.speedFX?'SPEED FX ON':'SPEED FX OFF',700); break;
+    case 'KeyR': doTrick(); break;
+    case 'KeyG': opts.probeGrid=!opts.probeGrid; syncToggles(); break;
+    case 'KeyT': opts.trail=!opts.trail; syncToggles(); break;
+    case 'KeyP': opts.predict=!opts.predict; syncToggles(); break;
+    case 'KeyB': opts.bounds=!opts.bounds; syncToggles(); break;
+    case 'Backquote': opts.debug=!opts.debug; syncToggles();
+                     flashBanner(opts.debug?'DEBUG OPEN':'DEBUG CLOSED',500); break;
+    case 'KeyO': opts.camMode=opts.camMode==='chase'?'orbit':'chase'; syncToggles(); break;
+    case 'KeyC': correctStance(); break;
+    case 'KeyH': opts.guardrail=!opts.guardrail; syncToggles();
+                 flashBanner(opts.guardrail?'GUARDRAIL ON':'GUARDRAIL OFF',800); break;
+    case 'KeyX': respawn(); break;
+    case 'ArrowLeft':  tuneSel=(tuneSel-1+P_KEYS.length)%P_KEYS.length; syncTuneValues(); break;
+    case 'ArrowRight': tuneSel=(tuneSel+1)%P_KEYS.length; syncTuneValues(); break;
+    case 'ArrowUp':    adjustTune(+1,e.shiftKey); break;
+    case 'ArrowDown':  adjustTune(-1,e.shiftKey); break;
+    case 'Digit0': for (const k of P_KEYS) P[k].v=P[k].def; syncTuneValues(); flashBanner('DEBUG VALUES RESET',700); break;
+  }
+});
+addEventListener('keyup',e=>{ keys[e.code]=false; });
+addEventListener('mousedown',e=>{
+  if (e.button!==0) return;
+  // the debug panel opts into pointer events so it can scroll — clicks that
+  // land on it shouldn't reach the game
+  if (e.target!==renderer.domElement) return;
+  // one button for the whole line: fires it, then cuts it
+  if (harp.attached) detach(false); else fireHarpoon();
+});
+const crosshairEl=document.getElementById('crosshair');
+addEventListener('mousemove',e=>{
+  mouseNDC.x=(e.clientX/innerWidth)*2-1;
+  mouseNDC.y=-(e.clientY/innerHeight)*2+1;
+  crosshairEl.style.left=e.clientX+'px';
+  crosshairEl.style.top=e.clientY+'px';
+});
+const opts={debug:false,wrap:true,probeGrid:false,guardrail:true,bounds:false,trail:true,predict:true,speedFX:true,camMode:'chase'};
+function syncToggles(){
+  const set=(id,on)=>{ const el=document.getElementById(id); el.textContent=on?'on':'off'; el.className=on?'on':'off'; };
+  set('k-grid',opts.probeGrid); set('k-rail',opts.guardrail);
+  set('k-bounds',opts.bounds); set('k-trail',opts.trail); set('k-pred',opts.predict);
+  set('k-fx',opts.speedFX);
+  const c=document.getElementById('k-cam'); c.textContent=opts.camMode; c.className='on';
+  document.getElementById('tune').style.display=opts.debug?'block':'none';
+}
+function respawn(startHitched){
+  const w=pathToWorld(14,0,0);
+  player.position.set(w.x,w.y,w.z); vel.set(0,0,0);
+  st.grounded=true; st.yaw=w.heading; camYaw=w.heading; st.airTime=0; st.peakRise=0;
+  st.lastImpact=null; st.lastContact=null;
+  st.grinding=false; st.rail=null;
+  hitch.car=null; hitch.candidate=null; hitch.nearest=null; gripArm.visible=false;
+  detach(true); harp.heat=0; harp.wrapCount=0; harp.unwrapCount=0; trailPoints.length=0;
+  if (!startHitched){ flashBanner('RESPAWNED',500); return; }
+
+  // Open mid-job rather than stood at a start line: already holding a car
+  // that's already rolling.
+  const c=cars.find(x=>x.type.name==='REGULAR JOE')||cars[0];
+  c.laneX=-ROAD_WIDTH/2+LANE_WIDTH*2.5;              // centre lane
+  c.pathS=26;
+  c.speed=c.baseSpeed=c.type.speedMin+2;
+  c.avoidSpeed=c.speed; c.weavePhase=0;
+  // clear the traffic immediately around it so nothing is spawned on top of us
+  for (const o of cars){
+    if (o!==c && Math.abs(o.pathS-c.pathS)<26) o.pathS=c.pathS+45+Math.random()*150;
+  }
+  // culling reads st.pathS, so set it before placing meshes or the far cars
+  // get recycled to behind the player
+  st.pathS=c.pathS;
+  updateTraffic(0);                                   // position meshes for frame one
+
+  hitch.car=c; hitch.gen=c.gen;
+  hitch.u=c.type.d+c.type.w*0.5;                      // middle of the rear panel
+  hitch.face='rear';
+  hitchWorld(c,hitch.u,g('hitchStandoff'),_hw);
+  const gnd=sampleGround(_hw.x,_hw.z,c.mesh.position.y+1);
+  player.position.set(_hw.x,gnd.y===-Infinity?w.y:gnd.y,_hw.z);
+  carVelocity(c,vel);
+  st.yaw=c.mesh.rotation.y; camYaw=st.yaw;
+  flashBanner('HITCHED — '+c.type.name,1100);
+}
+let bannerT=null;
+function flashBanner(text,ms){
+  const el=document.getElementById('banner');
+  el.textContent=text; el.classList.add('show');
+  clearTimeout(bannerT); bannerT=setTimeout(()=>el.classList.remove('show'),ms);
+}
+
+// ===================================================================
+// PLAYER PHYSICS
+// ===================================================================
+const _F=new V3(),_R=new V3(),_N=new V3(),_grav=new V3(),_tmp=new V3(),_prev=new V3(),_cv=new V3();
+const _face=new V3(),_relV=new V3(),_tangV=new V3(),_contact=new V3(),_cv2=new V3();
+let grazeSparkAccum=0, grazeBannerCd=0;
+
+function handleCarBodyCollision(dt){
+  const pos=player.position, chest=pos.y+0.9;
+  for (const c of cars){
+    if (Math.abs(c.pathS-st.pathS)>30) continue;
+    if (st.onCar===c) continue;
+    if (hitch.car===c) continue;               // you're holding it, not hitting it
+    const h=c.mesh.rotation.y;
+    const fx=Math.sin(h),fz=Math.cos(h),rx=Math.cos(h),rz=-Math.sin(h);
+    const dx=pos.x-c.mesh.position.x,dz=pos.z-c.mesh.position.z;
+    const lf=dx*fx+dz*fz,lr=dx*rx+dz*rz;
+    const halfW=c.type.w/2+0.35,halfD=c.type.d/2+0.35;
+    if (Math.abs(lr)>=halfW||Math.abs(lf)>=halfD) continue;
+    if (chest>c.mesh.position.y+c.type.h/2+0.5) continue;
+
+    const penSide=halfW-Math.abs(lr), penEnd=halfD-Math.abs(lf);
+    const sideHit=penSide<=penEnd;
+    const sgn=sideHit?(lr>=0?1:-1):(lf>=0?1:-1);
+    _face.set(sideHit?rx*sgn:fx*sgn, 0, sideHit?rz*sgn:fz*sgn);
+    pos.addScaledVector(_face, sideHit?penSide:penEnd);
+
+    carVelocity(c,_cv2);
+    _relV.copy(vel).sub(_cv2);
+    const inward=_relV.dot(_face);
+    _tangV.copy(_relV).addScaledVector(_face,-inward);
+    const tangSp=_tangV.length();
+    const angle=Math.atan2(Math.abs(Math.min(0,inward)),Math.max(0.001,tangSp))*180/Math.PI;
+
+    _contact.copy(pos).addScaledVector(_face,-0.4);
+    _contact.y+=0.55;
+
+    const towRear = harp.attached && c===harp.car && !sideHit && sgn<0;
+    const isGraze = towRear || angle < g('grazeAngle');
+    const before = vel.length();
+
+    if (isGraze){
+      if (tangSp>1e-3){
+        const target = towRear ? tangSp : _relV.length()*g('grazeRetain');
+        _relV.copy(_tangV).setLength(target);
+      } else _relV.set(0,0,0);
+      _relV.addScaledVector(_face, towRear ? g('towRearBounce') : g('grazeBounce'));
+      vel.copy(_relV).add(_cv2);
+      grazeSparkAccum+=dt*Math.max(0.001,g('sparkRate'));
+      while (grazeSparkAccum>0.012){
+        emitContactSpark(_contact,_tangV,_face,Math.max(tangSp,towRear?4:0));
+        grazeSparkAccum-=0.012;
+      }
+      grazeLight.position.copy(_contact);
+      grazeLight.intensity=Math.min(4,1.2+tangSp*0.12);
+      if (grazeBannerCd<=0){
+        flashBanner(towRear?'BUMP — TOW CAR':'GRAZE — '+angle.toFixed(0)+'°',420);
+        grazeBannerCd=0.55;
+      }
+      st.lastContact={angle,kind:towRear?'bump':'graze',kept:before>0.01?vel.length()/before:1};
+    } else {
+      _relV.addScaledVector(_face,-inward);
+      vel.copy(_relV).add(_cv2);
+      vel.multiplyScalar(g('hitRetain'));
+      const burst=Math.round(10*Math.max(0.001,g('sparkRate')));
+      for (let i=0;i<burst;i++) emitContactSpark(_contact,_tangV,_face,tangSp*0.45);
+      grazeLight.position.copy(_contact);
+      grazeLight.intensity=4.5;
+      flashBanner('HIT — '+angle.toFixed(0)+'°',380);
+      st.lastContact={angle,kind:'hit',kept:before>0.01?vel.length()/before:0};
+      // taking a real hit while holding on tears you off the car
+      if (hitch.car) releaseHitch(false,'TORN OFF');
+    }
+    break;
+  }
+}
+
+// ===================================================================
+// GRIND MODE
+// ===================================================================
+const _railT=new V3(),_railPt=new V3();
+// unit tangent of the path at s, slope included
+function pathTangent(s,out){
+  const p=samplePath(s),cp=Math.cos(p.pitch);
+  return out.set(Math.sin(p.heading)*cp,Math.sin(p.pitch),Math.cos(p.heading)*cp);
+}
+function tryMountRail(){
+  if (!railsEnabled||st.grinding||hitch.car) return false;
+  if (vel.y>1.5) return false;                       // must be coming down onto it
+  for (const r of rails){
+    if (st.pathS<r.sStart-1.5||st.pathS>r.sEnd-1) continue;
+    if (Math.abs(st.lateralX-r.lateral)>g('railCatchLat')) continue;
+    const railY=samplePath(st.pathS).y+r.heightAbove;
+    if (Math.abs(player.position.y-railY)>g('railCatchY')) continue;
+    st.grinding=true; st.rail=r; st.railS=st.pathS; st.darksideUsed=false; clearTricks();
+    // only the along-rail component survives the catch; the rest is absorbed
+    pathTangent(st.railS,_railT);
+    st.railSpeed=Math.max(g('railMinSpeed'),vel.dot(_railT));
+    // How you arrived decides what you're riding. The stance is carried as a
+    // yaw offset on the whole player, not on board.rotation.y — that axis
+    // belongs to the shove-it and darkside spins and they'd fight over it.
+    const railHeading=samplePath(st.railS).heading;
+    const d=wrapAngle(st.yaw-railHeading);
+    const side=g('railSideAngle')*Math.PI/180;
+    if (Math.abs(d)<side){ st.grindStance=0; flashBanner('FIFTY-FIFTY',420); }
+    else if (Math.abs(d)>Math.PI-side){ st.grindStance=Math.PI; flashBanner('FAKIE 50-50',420); }
+    else { st.grindStance=Math.sign(d)*Math.PI/2; flashBanner('BOARDSLIDE',420); }
+    return true;
+  }
+  return false;
+}
+function exitGrind(popped){
+  const r=st.rail;
+  if (!r){ st.grinding=false; return; }
+  const w=pathToWorld(st.railS,r.lateral,r.heightAbove);
+  player.position.set(w.x,w.y,w.z);
+  pathTangent(st.railS,_railT);
+  vel.copy(_railT).multiplyScalar(st.railSpeed);
+  vel.y+=popped?g('ollie'):3.0;
+  st.grinding=false; st.rail=null;
+  st.grounded=false; st.airTime=0; st.takeoffY=player.position.y; st.peakRise=0;
+  trailPoints.length=0;
+  beginAir(false,popped); clearTricks();
+  if (popped) flashBanner('POP OFF — '+(st.railSpeed*KMH).toFixed(0)+' KM/H',420);
+}
+let grindSparkAccum=0;
+function updateGrind(dt){
+  const r=st.rail;
+  if (rails.indexOf(r)===-1){ exitGrind(false); return; }
+  const p=samplePath(st.railS);
+  // gravity resolved along the bar, same as it is on any other slope
+  st.railSpeed+=-g('gravity')*Math.sin(p.pitch)*dt;
+  // plus the conceit that grinding builds speed — this is the reason to do it
+  st.railSpeed*=(1+g('grindAccel')*dt);
+  st.railSpeed=Math.max(0,st.railSpeed-g('railFriction')*dt);
+  st.railS+=st.railSpeed*dt;
+
+  const w=pathToWorld(st.railS,r.lateral,r.heightAbove);
+  player.position.set(w.x,w.y,w.z);
+  st.yaw=w.heading+st.grindStance;
+  st.surfaceId='rail'; st.surfaceY=w.y; st.surfacePitch=w.pitch;
+  st.surfaceNormal.set(-Math.sin(w.pitch)*Math.sin(w.heading),Math.cos(w.pitch),
+                       -Math.sin(w.pitch)*Math.cos(w.heading));
+  st.grounded=true; st.onCar=null; st.airTime=0;
+  pathTangent(st.railS,_railT);
+  vel.copy(_railT).multiplyScalar(st.railSpeed);
+
+  grindSparkAccum+=dt*Math.max(0.001,g('sparkRate'));
+  while (grindSparkAccum>0.018){
+    _railPt.set(0,-0.06,-0.2); board.localToWorld(_railPt);
+    _sparkDir.copy(_railT).negate();   // back along the bar, whatever the stance
+    emitRopeSpark(_railPt,_sparkDir,4+st.railSpeed*0.18,SPARK_GRIND);
+    grindSparkAccum-=0.018;
+  }
+
+  // the rail owns your position, so the rope constraint can't also have it.
+  // Let the line stay on but cut it if the anchor runs away — and honour a
+  // manual release, which used to live in applyRopeConstraint and so was
+  // unreachable from here.
+  if (harp.attached){
+    if (keys['KeyQ']) detach(false);
+    else {
+      anchorWorld(_tmpA);
+      if (_tmpA.distanceTo(player.position)>harp.maxLen) detach(true);
+    }
+  }
+
+  if (keys['Space']) exitGrind(true);
+  else if (st.railS>r.sEnd) exitGrind(false);
+}
+
+// ===================================================================
+// TRICKS
+// ===================================================================
+//
+// Which trick R produces depends on how you got airborne, exactly as in 0.3 —
+// the context flags are just set from the velocity model's launch points now
+// rather than from jumpY bookkeeping.
+function doTrick(){
+  if (st.grinding){
+    if (!st.darksiding&&!st.darksideUsed){
+      st.darksiding=true; st.darksideT=0; st.darksideUsed=true;
+      flashBanner('DARKSIDE!',480);
+    }
+    return;
+  }
+  if (st.grounded||st.trickUsed||hitch.car) return;
+  if (st.kickflipping||st.hardflipping||st.shoveitting) return;
+  st.trickUsed=true;
+  harp.heat=Math.max(0,harp.heat-g('trickHeatShave'));
+  if (st.fromBounce){ st.hardflipping=true; st.hardflipT=0; flashBanner('HARDFLIP!',420); }
+  else if (st.fromRailPop){ st.shoveitting=true; st.shoveitT=0; flashBanner('POP SHOVE-IT 360!',420); }
+  else { st.kickflipping=true; st.kickflipT=0; flashBanner('KICKFLIP!',420); }
+}
+// called when any launch begins, so the next R knows what it should be
+function beginAir(fromBounce,fromRailPop){
+  st.trickUsed=false;
+  st.fromBounce=!!fromBounce;
+  st.fromRailPop=!!fromRailPop;
+  st.flip=0; st.spinStart=st.yaw; st.spinTotal=0;
+}
+const TAU=Math.PI*2;
+function wrapAngle(a){ a%=TAU; if(a>Math.PI)a-=TAU; if(a<-Math.PI)a+=TAU; return a; }
+function lerpAngle(a,b,t){ return a+wrapAngle(b-a)*t; }
+// heading you are actually travelling in, which in the air has nothing to do
+// with which way the body is pointed
+function travelHeading(){
+  return (Math.hypot(vel.x,vel.z)>2) ? Math.atan2(vel.x,vel.z) : st.yaw;
+}
+// C: after landing switch, turn the RIDER round. The deck is symmetric so
+// re-aiming yaw leaves it looking identical, and doing it instantly means the
+// grip term never gets a chance to drag the velocity vector with it — the
+// board holds its line and every bit of momentum survives.
+function correctStance(){
+  if (!st.grounded||st.grinding) return;
+  const tgt=travelHeading();
+  const delta=wrapAngle(tgt-st.yaw);
+  if (Math.abs(delta)<20*Math.PI/180){ flashBanner('ALREADY FORWARD',380); return; }
+  st.yaw=tgt;                 // instant, so nothing swings and nothing is lost
+  st.riderSpin=-delta;        // the visible turn happens on the rider alone
+  flashBanner('SWITCH STANCE',400);
+}
+// Named on landing from what you actually rotated, and checked for whether
+// you're the right way up. Without the upright test a flip is free and there's
+// no reason not to hold W on every jump.
+function resolveAirRotation(){
+  const nearest=Math.round(st.flip/TAU);
+  const signedOff=st.flip-nearest*TAU;
+  const nFlips=Math.abs(nearest);
+  const halfTurns=Math.round(Math.abs(st.spinTotal)/Math.PI);
+  let label='';
+  if (nFlips>0&&halfTurns>=3) label=(nFlips>1?nFlips+'x ':'')+'McTWIST '+(halfTurns*180);
+  else if (nFlips>0) label=(nFlips>1?nFlips+'x ':'')+(st.flip>0?'FRONTFLIP':'BACKFLIP');
+  else if (halfTurns>=2) label=(halfTurns*180)+' SPIN';
+  return {bailed:Math.abs(signedOff)>g('flipLandTol'),label,signedOff,
+          off:Math.abs(signedOff)*180/Math.PI};
+}
+function clearTricks(){
+  st.kickflipping=st.hardflipping=st.shoveitting=st.darksiding=false;
+  board.rotation.z=0; board.rotation.y=0;
+}
+function updateTricks(dt){
+  const dur=Math.max(0.05,g('trickDuration'));
+  if (st.kickflipping){
+    st.kickflipT+=dt/dur;
+    board.rotation.z=Math.PI*2*Math.min(1,st.kickflipT);
+    if (st.kickflipT>=1) st.kickflipping=false;
+  }
+  if (st.hardflipping){
+    st.hardflipT+=dt/dur;
+    const t=Math.min(1,st.hardflipT);
+    board.rotation.z=Math.PI*2*t;   // full flip about the deck's length
+    board.rotation.y=Math.PI*t;     // plus a half-turn shove-it
+    if (t>=1) st.hardflipping=false;
+  }
+  if (st.shoveitting){
+    st.shoveitT+=dt/dur;
+    board.rotation.y=Math.PI*2*Math.min(1,st.shoveitT);
+    if (st.shoveitT>=1) st.shoveitting=false;
+  }
+  if (st.darksiding){
+    st.darksideT+=dt/(dur*0.95);
+    board.rotation.y=Math.PI*2*Math.min(1,st.darksideT);
+    if (st.darksideT>=1) st.darksiding=false;
+  }
+  if (!st.kickflipping&&!st.hardflipping) board.rotation.z=0;
+  if (!st.hardflipping&&!st.shoveitting&&!st.darksiding) board.rotation.y=0;
+}
+
+function updatePlayer(dt){
+  const pos=player.position;
+  _prev.copy(pos);
+  // Shift means two different things depending on whether a line is out, but
+  // both are the same tail-drag pose. Resolved before the yaw step because
+  // drifting changes turn authority.
+  const shiftHeld=!!(keys['ShiftLeft']||keys['ShiftRight']);
+  st.braking =harp.attached&&st.grounded&&shiftHeld;              // strafe behind the car
+  st.drifting=!harp.attached&&!hitch.car&&st.grounded&&shiftHeld;  // free-skate powerslide
+  // ordinary S braking scrapes the deck just as much, so it earns the same
+  // pose and sparks. Gated on actually moving, or the tail would stay up
+  // while you sat still holding the key.
+  st.footBrake=!harp.attached&&!hitch.car&&!st.grinding&&st.grounded&&
+               !!keys['KeyS']&&vel.length()>g('brakePoseMinSpeed');
+  st.tailDrag=st.braking||st.drifting||st.footBrake;
+
+  if (st.grinding){
+    updateGrind(dt);
+  } else if (hitch.car){
+    updateHitchMode(dt);
+  } else {
+    let turnInput=0;
+    if (keys['KeyA']) turnInput=1;
+    if (keys['KeyD']) turnInput=-1;
+    const towed=harp.attached;
+    if (st.grounded){
+      const sp=vel.length();
+      const sf=clamp(sp/Math.max(1,g('maxSpeed')),0,1);
+      let turnMul=lerp(1.0,0.45,sf);
+      // above the cap speedFrac saturates, so every tow speed used to steer
+      // identically. Angular rate for a given lateral force goes as a/v, so
+      // keep scaling by 1/v past the cap instead of flatlining.
+      if (sp>g('maxSpeed')) turnMul*=Math.pow(g('maxSpeed')/sp,g('turnFalloff'));
+      // scraping the tail unweights the nose — that IS the pivot technique
+      // breaking traction lets the board rotate far ahead of the velocity
+      // vector — that slip angle is the drift, and it's what buys a tighter
+      // line at speed where the 1/v falloff has throttled normal steering
+      if (st.drifting) turnMul*=g('driftTurn');
+      // while towed the same keys strafe instead, so steering is surrendered
+      if (!st.braking) st.yaw+=turnInput*g('turnRate')*turnMul*dt;
+    } else {
+      // In the air, yaw no longer steers anything — the velocity vector does —
+      // so it's free to be a spin. Tracked separately from st.yaw so the trick
+      // can be named on landing.
+      const spin=turnInput*g('airYaw')*dt;
+      st.yaw+=spin; st.spinTotal+=spin;
+      // W/S flip the body. Only when no line is out, since they're reel
+      // controls the rest of the time.
+      // Flips need genuine altitude. The bar is derived from the ollie rather
+      // than fixed, so it stays honest if ollie or gravity are retuned. A flat
+      // ollie peaks at exactly ollie^2/(2g), so the multiplier sits just above
+      // 1.0 to clear it outright rather than arming for a frame at the apex.
+      st.flipArmed=false;
+      // popping off a rail launches you already rotating on the board — a
+      // body flip on top of it reads as a mess, so that context is excluded
+      if (!harp.attached&&!hitch.car&&!st.fromRailPop&&(keys['KeyW']||keys['KeyS'])){
+        const gh=sampleGround(pos.x,pos.z,pos.y);
+        const clearance=gh.y===-Infinity?999:pos.y-gh.y;
+        st.flipNeed=g('flipMinOllies')*g('ollie')*g('ollie')/(2*Math.max(1,g('gravity')));
+        st.flipArmed=clearance>=st.flipNeed;
+        if (st.flipArmed){
+          if (keys['KeyW']) st.flip+=g('flipRate')*dt;
+          if (keys['KeyS']) st.flip-=g('flipRate')*dt;
+        }
+      }
+    }
+    st.turnInput=turnInput;
+
+    if (st.grounded){
+      const support=sampleGround(pos.x,pos.z,pos.y);
+      st.surfaceId=support.id; st.surfaceY=support.y; st.surfacePitch=support.pitch;
+      st.onCar=support.isCar?support.ref:null;
+      _N.copy(normalOf(support)); st.surfaceNormal.copy(_N);
+      _grav.set(0,-g('gravity'),0);
+      _tmp.copy(_grav).addScaledVector(_N,-_grav.dot(_N));
+      vel.addScaledVector(_tmp,dt);
+      _F.set(Math.sin(st.yaw),0,Math.cos(st.yaw));
+      _F.addScaledVector(_N,-_F.dot(_N));
+      if (_F.lengthSq()<1e-6) _F.set(Math.sin(st.yaw),0,Math.cos(st.yaw));
+      _F.normalize();
+      _R.crossVectors(_N,_F).normalize();
+      if (!towed){
+        if (keys['KeyW']&&vel.dot(_F)<g('maxSpeed')) vel.addScaledVector(_F,g('thrust')*dt);
+        if (keys['KeyS']) vel.addScaledVector(_F,-g('thrust')*1.3*dt);
+      } else if (st.braking){
+        // pure lateral shove, no deceleration — this is a strafe across the
+        // back of the car, not a brake.
+        // NOTE: _R = cross(N,F) points screen-LEFT, not right — the codebase
+        // calls it "right" but the handedness says otherwise. So +turnInput
+        // (A) with +_R is genuinely left.
+        vel.addScaledVector(_R,turnInput*g('brakeStrafe')*dt);
+      }
+      if (st.drifting&&g('driftDrag')>0){
+        // a drift that costs nothing would be strictly better than not
+        // drifting, so sliding sideways scrubs a little speed
+        const dsp=vel.length();
+        if (dsp>1e-3) vel.multiplyScalar(Math.max(0,1-(g('driftDrag')*dt)/dsp));
+      }
+      // a dragging tail has broken traction. Grip must DROP here, not rise —
+      // it damps lateral velocity, so at the old boosted value it would erase
+      // the strafe the moment it was applied.
+      let gripNow=g('grip')*(towed?g('towGrip'):1);
+      if (st.braking) gripNow*=g('brakeGrip');
+      else if (st.drifting) gripNow*=g('driftGrip');
+      vel.addScaledVector(_R,-vel.dot(_R)*Math.min(1,gripNow*dt));
+      const sp=vel.length();
+      if (sp>1e-4){
+        const decel=g('rollFriction')+g('dragQuad')*sp*sp;
+        vel.multiplyScalar(Math.max(0,1-(decel*dt)/sp));
+      }
+      if (keys['Space']){
+        _tmp.copy(_N).lerp(UP,g('ollieUpBlend')).normalize();
+        vel.addScaledVector(_tmp,g('ollie'));
+        st.grounded=false; st.airTime=0; st.takeoffY=pos.y; st.peakRise=0;
+        trailPoints.length=0; pos.y+=0.03; beginAir(false,false);
+      }
+      if (st.onCar){ carVelocity(st.onCar,_cv); pos.addScaledVector(_cv,dt); }
+      pos.addScaledVector(vel,dt);
+      applyRopeConstraint(dt);
+      const after=sampleGround(pos.x,pos.z,pos.y);
+      if (after.y===-Infinity||pos.y>after.y+0.06){
+        st.grounded=false; st.airTime=0; st.takeoffY=_prev.y; st.peakRise=0;
+        trailPoints.length=0; st.onCar=null; beginAir(false,false);
+        if (vel.y>1.5) flashBanner('LAUNCH — '+String(st.surfaceId).toUpperCase(),500);
+      } else {
+        pos.y=after.y;
+        st.surfaceId=after.id; st.surfaceY=after.y; st.surfacePitch=after.pitch;
+        st.onCar=after.isCar?after.ref:null;
+        const N2=normalOf(after),keep=vel.length();
+        st.surfaceNormal.copy(N2);
+        vel.addScaledVector(N2,-vel.dot(N2));
+        if (vel.lengthSq()>1e-6) vel.setLength(keep);
+      }
+    } else {
+      st.airTime+=dt;
+      vel.y-=g('gravity')*dt;
+      pos.addScaledVector(vel,dt);
+      applyRopeConstraint(dt);
+      st.peakRise=Math.max(st.peakRise,pos.y-st.takeoffY);
+      if (tryMountRail()) return;
+      const probeY=Math.max(_prev.y,pos.y);
+      const supPrev=sampleGround(_prev.x,_prev.z,probeY);
+      const supNew =sampleGround(pos.x,pos.z,probeY);
+      const hPrev=_prev.y-supPrev.y,hNew=pos.y-supNew.y;
+      if (hPrev>0&&hNew<=0&&isFinite(hPrev)&&isFinite(hNew)){
+        const t=hPrev/Math.max(1e-6,hPrev-hNew);
+        pos.lerpVectors(_prev,pos,t);
+        const land=sampleGround(pos.x,pos.z,pos.y+0.6);
+        pos.y=land.y;
+        _N.copy(normalOf(land)); st.surfaceNormal.copy(_N);
+        const vn=vel.dot(_N);
+        _tmp.copy(vel).addScaledVector(_N,-vn);
+        const tangSp=_tmp.length(),impactSp=Math.abs(Math.min(0,vn));
+        const angle=Math.atan2(impactSp,Math.max(0.001,tangSp))*180/Math.PI;
+        const recovered=tangSp+impactSp*g('landingRecover');
+        if (tangSp>1e-3) vel.copy(_tmp).setLength(recovered); else vel.set(0,0,0);
+        const air=resolveAirRotation();
+        if (air.bailed) vel.multiplyScalar(g('bailRetain'));
+        st.flipVis=air.signedOff;      // carry only the residual, never a whole turn
+        st.grounded=true; beginAir(false,false); clearTricks();
+        st.surfaceId=land.id; st.surfaceY=land.y; st.surfacePitch=land.pitch;
+        st.onCar=land.isCar?land.ref:null;
+        st.lastImpact={angle,lost:impactSp*(1-g('landingRecover'))};
+        if (land.isCar&&g('roofBounce')>0.01){
+          vel.addScaledVector(_N,g('roofBounce'));
+          st.grounded=false; st.airTime=0; st.takeoffY=pos.y; st.peakRise=0; trailPoints.length=0;
+          beginAir(true,false);
+          flashBanner('ROOF BOUNCE — '+land.ref.type.name,450);
+        } else if (air.bailed){
+          flashBanner('BAILED — '+air.off.toFixed(0)+'° OFF UPRIGHT',780);
+        } else if (air.label){
+          flashBanner(air.label+' — '+st.airTime.toFixed(2)+'s',780);
+        } else if (st.airTime>0.25){
+          flashBanner((angle<22?'CLEAN LANDING':angle<45?'ROUGH LANDING':'SLAM')+
+                      ' — '+angle.toFixed(0)+'° · '+st.airTime.toFixed(2)+'s air',700);
+        }
+        st.airTime=0;
+      }
+      if (opts.trail){
+        trailPoints.push(pos.x,pos.y+0.2,pos.z);
+        if (trailPoints.length>TRAIL_MAX*3) trailPoints.splice(0,3);
+      }
+    }
+  }
+
+  if (pos.y<-50){ flashBanner('FELL OUT OF WORLD',800); respawn(); return; }
+  if (!st.onCar) handleCarBodyCollision(dt);
+
+  const proj=worldToPath(pos.x,pos.z);
+  st.pathS=proj.s; st.lateralX=proj.lateral;
+  const sol=solids.find(s=>s.label===st.surfaceId);
+  const onRoadish=st.surfaceId==='road'||(sol&&sol.onRoad);
+  // the car owns your position while hitched — the guardrail must not fight it
+  if (opts.guardrail&&st.grounded&&onRoadish&&!st.onCar&&!hitch.car){
+    const edge=ROAD_WIDTH/2-1;
+    if (Math.abs(proj.lateral)>edge){
+      const w2=pathToWorld(proj.s,clamp(proj.lateral,-edge,edge),0);
+      pos.x=w2.x; pos.z=w2.z;
+      _R.set(-Math.cos(proj.point.heading),0,Math.sin(proj.point.heading));
+      if (vel.dot(_R)*Math.sign(proj.lateral)>0) vel.addScaledVector(_R,-vel.dot(_R));
+    }
+  }
+
+  const horiz=Math.hypot(vel.x,vel.z);
+  const targetPitch=st.grounded?st.surfacePitch:Math.atan2(vel.y,Math.max(0.001,horiz));
+  st.travelPitch=lerp(st.travelPitch,targetPitch,Math.min(1,dt*9));
+
+  let targetRoll;
+  if (hitch.car){
+    // lean into the panel you're holding
+    hitchNormal(hitch.car,hitch.face,_hn);
+    const rX=Math.cos(st.yaw),rZ=-Math.sin(st.yaw);
+    targetRoll=0.24*Math.sign((-_hn.x)*rX+(-_hn.z)*rZ);
+  } else {
+    const ti=st.turnInput||0;
+    targetRoll=st.tailDrag?-ti*0.30
+      :st.grounded?-ti*0.22*clamp(horiz/12,0,1):-ti*0.15;
+  }
+  st.roll=lerp(st.roll,targetRoll,Math.min(1,dt*6));
+  st.flipVis=st.grounded?lerp(st.flipVis,0,Math.min(1,dt*12)):st.flip;
+  player.rotation.set(-st.travelPitch+st.flipVis,st.yaw,st.roll);
+
+  // ---- tail drag pose ----
+  // Tilting about the board's centre would bury the tail, so it lifts by the
+  // sag as it rotates and the deck's back edge stays on the road.
+  st.riderSpin=lerp(st.riderSpin,0,Math.min(1,dt*g('stanceRate')));
+  rider.rotation.y=st.riderSpin;
+  updateTricks(dt);
+  st.brakeLevel=lerp(st.brakeLevel,st.tailDrag?1:0,Math.min(1,dt*11));
+  const bAng=g('brakeAngle')*Math.PI/180*st.brakeLevel;
+  board.rotation.x=-bAng;                       // negative lifts the nose
+  board.position.y=0.15+Math.sin(bAng)*0.9;
+  if (st.brakeLevel>0.25){
+    brakeSparkAccum+=dt*Math.max(0.001,g('sparkRate'))*st.brakeLevel;
+    const step=0.016;
+    while (brakeSparkAccum>step){
+      _brakePt.set(0,-0.06,-0.92);
+      board.localToWorld(_brakePt);             // true tail point, tilt included
+      _sparkDir.set(-Math.sin(st.yaw),0,-Math.cos(st.yaw));
+      emitRopeSpark(_brakePt,_sparkDir,5+vel.length()*0.22,0xffe14d);
+      brakeSparkAccum-=step;
+    }
+  } else brakeSparkAccum=0;
+
+  fill.position.set(pos.x,pos.y+40,pos.z);
+
+  scanHitch();
+  updateGripArm();
+  updateGrabRing();
+  grazeBannerCd=Math.max(0,grazeBannerCd-dt);
+  grazeLight.intensity=Math.max(0,grazeLight.intensity-dt*14);
+}
+
+// ===================================================================
+// DEBUG VISUALS
+// ===================================================================
+const TRAIL_MAX=420,trailPoints=[];
+const trailGeo=new THREE.BufferGeometry();
+trailGeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(TRAIL_MAX*3),3));
+const trailLine=new THREE.Line(trailGeo,new THREE.LineBasicMaterial({color:0xffe14d,transparent:true,opacity:0.85}));
+trailLine.frustumCulled=false; scene.add(trailLine);
+function updateTrail(){
+  trailLine.visible=opts.trail&&trailPoints.length>=6;
+  if (!trailLine.visible) return;
+  const arr=trailGeo.attributes.position.array;
+  const n=Math.min(TRAIL_MAX,trailPoints.length/3);
+  for (let i=0;i<n*3;i++) arr[i]=trailPoints[i];
+  trailGeo.attributes.position.needsUpdate=true;
+  trailGeo.setDrawRange(0,n);
+}
+const predRing=new THREE.Mesh(new THREE.RingGeometry(0.7,1.0,26),
+  new THREE.MeshBasicMaterial({color:0x00ffe1,transparent:true,opacity:0.7,side:THREE.DoubleSide,depthTest:false}));
+predRing.rotation.x=-Math.PI/2; predRing.renderOrder=996; predRing.visible=false; scene.add(predRing);
+const _pp=new V3(),_pv=new V3();
+function updatePrediction(){
+  if (!opts.predict||st.grounded||harp.attached||hitch.car){ predRing.visible=false; return; }
+  _pp.copy(player.position); _pv.copy(vel);
+  for (let i=0;i<90;i++){
+    const py=_pp.y;
+    _pv.y-=g('gravity')*0.04;
+    _pp.addScaledVector(_pv,0.04);
+    const sup=sampleGround(_pp.x,_pp.z,Math.max(py,_pp.y));
+    if (sup.y===-Infinity) continue;
+    if (py-sup.y>0&&_pp.y-sup.y<=0){
+      predRing.visible=true; predRing.position.set(_pp.x,sup.y+0.08,_pp.z); return;
+    }
+  }
+  predRing.visible=false;
+}
+const PROBE_N=9,PROBE_SPACING=3.2,probeMarkers=[],probeGroup=new THREE.Group();
+probeGroup.visible=false; scene.add(probeGroup);
+const PROBE_COLORS={road:0xff2fd0,plaza:0x00ffe1,kiosk:0xffe14d,perch:0x66ff99,tower:0x8a5cff,landing:0x3fd8ff,void:0x552233};
+function probeColor(id){
+  if (PROBE_COLORS[id]) return PROBE_COLORS[id];
+  if (id.startsWith('car:')) return 0xff4444;
+  if (id==='rail') return 0x00ffe1;
+  if (id==='overpass') return 0x00c8ff;
+  if (id==='pillar') return 0x6a5aff;
+  if (id.startsWith('kicker')) return 0xff6a3f;
+  if (id.startsWith('step')) return 0xff9a3f;
+  return 0xffffff;
+}
+for (let i=0;i<PROBE_N*PROBE_N;i++){
+  const m=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.06,0.5),
+    new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.75,depthTest:false}));
+  m.renderOrder=995; probeGroup.add(m); probeMarkers.push(m);
+}
+function updateProbeGrid(){
+  probeGroup.visible=opts.probeGrid;
+  if (!opts.probeGrid) return;
+  const half=(PROBE_N-1)/2; let idx=0;
+  for (let gz=0;gz<PROBE_N;gz++) for (let gx=0;gx<PROBE_N;gx++){
+    const ox=(gx-half)*PROBE_SPACING,oz=(gz-half)*PROBE_SPACING;
+    const wx=player.position.x+ox*Math.cos(st.yaw)+oz*Math.sin(st.yaw);
+    const wz=player.position.z-ox*Math.sin(st.yaw)+oz*Math.cos(st.yaw);
+    const gd=sampleGround(wx,wz,player.position.y);
+    const m=probeMarkers[idx++];
+    if (gd.y===-Infinity){ m.visible=false; continue; }
+    m.visible=true; m.position.set(wx,gd.y+0.04,wz);
+    m.material.color.setHex(probeColor(gd.id));
+    m.material.opacity=gd.id===st.surfaceId?0.95:0.42;
+  }
+}
+const boundsGroup=new THREE.Group(); boundsGroup.visible=false; scene.add(boundsGroup);
+const boundsMat=new THREE.LineBasicMaterial({color:0x00ffe1,transparent:true,opacity:0.6});
+function rebuildBounds(){
+  while (boundsGroup.children.length) boundsGroup.remove(boundsGroup.children[0]);
+  if (!opts.bounds) return;
+  for (const s of solids){
+    const geo=new THREE.BufferGeometry(),hw=s.w/2,hd=s.d/2,pts=[];
+    for (const [lr,lf] of [[-hw,-hd],[hw,-hd],[hw,hd],[-hw,hd],[-hw,-hd]]){
+      const sh=Math.sin(s.heading),ch=Math.cos(s.heading);
+      pts.push(s.x+lr*ch+lf*sh,s.topAt(lf).y+0.08,s.z-lr*sh+lf*ch);
+    }
+    geo.setAttribute('position',new THREE.Float32BufferAttribute(pts,3));
+    boundsGroup.add(new THREE.Line(geo,boundsMat));
+  }
+}
+const carHullGroup=new THREE.Group(); carHullGroup.visible=false; scene.add(carHullGroup);
+const carHullMat=new THREE.LineBasicMaterial({color:0xffe14d,transparent:true,opacity:0.55});
+const cornerDotMat=new THREE.MeshBasicMaterial({color:0x00ffe1,transparent:true,opacity:0.8,depthTest:false});
+const carHulls=[],cornerDots=[];
+function updateCarHulls(){
+  carHullGroup.visible=opts.bounds;
+  if (!opts.bounds) return;
+  const inset=g('cornerInset');
+  let idx=0,dotIdx=0;
+  for (const c of cars){
+    if (Math.abs(c.pathS-st.pathS)>50) continue;
+    while (carHulls.length<=idx){
+      const geo=new THREE.BufferGeometry();
+      geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(15),3));
+      const line=new THREE.Line(geo,carHullMat);
+      line.frustumCulled=false; carHullGroup.add(line); carHulls.push(line);
+    }
+    const line=carHulls[idx++]; line.visible=true;
+    const cs=carCorners(c,inset,_cornersA),arr=line.geometry.attributes.position.array;
+    const yy=c.mesh.position.y+c.type.h*0.45;
+    for (let i=0;i<5;i++){
+      const p=cs[i%4];
+      arr[i*3]=p.x; arr[i*3+1]=yy; arr[i*3+2]=p.z;
+    }
+    line.geometry.attributes.position.needsUpdate=true;
+    for (let i=0;i<4;i++){
+      while (cornerDots.length<=dotIdx){
+        const m=new THREE.Mesh(new THREE.SphereGeometry(0.09,6,6),cornerDotMat);
+        m.renderOrder=996; carHullGroup.add(m); cornerDots.push(m);
+      }
+      const d=cornerDots[dotIdx++];
+      d.visible=true; d.position.set(cs[i].x,yy,cs[i].z);
+    }
+  }
+  for (let i=idx;i<carHulls.length;i++) carHulls[i].visible=false;
+  for (let i=dotIdx;i<cornerDots.length;i++) cornerDots[i].visible=false;
+}
+
+// ===================================================================
+// SPEED STREAKS
+// ===================================================================
+//
+// The 0.3 build anchored every streak to pathToWorld(pathS + offset, ...) so
+// they curved with the road. That still looks best on the corridor, but the
+// player is now a free body that can be on a rooftop or mid-arc where the
+// path isn't where they are. So each streak picks its anchoring when it
+// spawns and keeps it for its whole life — switching mid-flight would pop.
+const STREAK_COUNT=16;
+const streakGeo=new THREE.BoxGeometry(0.045,0.045,2.8);
+const streaks=[];
+for (let i=0;i<STREAK_COUNT;i++){
+  const mesh=new THREE.Mesh(streakGeo,new THREE.MeshBasicMaterial({
+    color: Math.random()<0.5?0xff2fd0:0x00ffe1,
+    // depth-tested so traffic and buildings occlude them; depthWrite off so
+    // they don't occlude each other. depthTest:false had them painting over
+    // the player and every car in front.
+    transparent:true, opacity:0, depthTest:true, depthWrite:false,
+    blending:THREE.AdditiveBlending}));
+  mesh.renderOrder=993; mesh.visible=false; scene.add(mesh);
+  streaks.push({mesh,along:0,lat:0,vert:0,mode:'vel',spawnAlong:1});
+}
+let streakIntensity=0, shakeLevel=0, fovLevel=0, zoomLevel=0, camTargetDist=0;
+const _stDir=new V3(),_stRight=new V3(),_stUp=new V3(),_stPos=new V3();
+function resetStreak(d){
+  const ang=Math.random()*Math.PI*2, rad=1.0+Math.random()*3.0;
+  d.lat=Math.cos(ang)*rad;
+  d.vert=0.5+Math.random()*2.4;
+  d.along=d.spawnAlong=14+Math.random()*12;
+  d.mode=(st.grounded&&st.surfaceId==='road')?'path':'vel';
+}
+for (const d of streaks) resetStreak(d);
+
+function updateStreaks(dt){
+  const kmh=vel.length()*KMH;
+  const target=clamp((kmh-g('streakStart'))/Math.max(1,g('streakFull')-g('streakStart')),0,1);
+  streakIntensity=lerp(streakIntensity,opts.speedFX?target:0,Math.min(1,dt*5));
+  const active=streakIntensity>0.02;
+
+  // travel-direction basis, so streaks lie along the arc when airborne
+  _stDir.copy(vel);
+  if (_stDir.lengthSq()<1e-4) _stDir.set(Math.sin(st.yaw),0,Math.cos(st.yaw));
+  _stDir.normalize();
+  _stRight.crossVectors(_stDir,UP);
+  if (_stRight.lengthSq()<1e-4) _stRight.set(1,0,0);
+  _stRight.normalize();
+  _stUp.crossVectors(_stRight,_stDir).normalize();
+
+  for (const d of streaks){
+    d.mesh.visible=active;
+    if (!active) continue;
+    d.along-=(g('streakStream')+vel.length()*0.35)*dt;
+    if (d.along<-4) resetStreak(d);
+    if (d.mode==='path'){
+      const w=pathToWorld(st.pathS+d.along, st.lateralX+d.lat, d.vert);
+      d.mesh.position.set(w.x,w.y,w.z);
+      d.mesh.rotation.set(0,w.heading,0);
+    } else {
+      _stPos.copy(player.position)
+        .addScaledVector(_stDir,d.along)
+        .addScaledVector(_stRight,d.lat)
+        .addScaledVector(_stUp,d.vert);
+      d.mesh.position.copy(_stPos);
+      d.mesh.quaternion.setFromUnitVectors(_fwdZ,_stDir);
+    }
+    // A streak ending its run passes within a metre of the lens, where a
+    // 2.8-unit line covers ~190% of the frame. Fading by camera proximity
+    // kills that swipe without dimming the distant ones that read as speed.
+    const near=clamp(d.mesh.position.distanceTo(camera.position)/Math.max(0.1,g('streakNearFade')),0,1);
+    // and a birth/death envelope so none of them pop in or out mid-frame
+    const p=clamp((d.spawnAlong-d.along)/Math.max(1,d.spawnAlong+4),0,1);
+    const env=Math.min(1,p/0.12)*Math.min(1,(1-p)/0.3);
+    d.mesh.material.opacity=Math.min(g('streakOpacity'),streakIntensity*1.25)*near*near*env;
+  }
+}
+
+// ===================================================================
+// CAMERA
+// ===================================================================
+const BASE_FOV=70;
+const camTarget=new V3(), camBase=new V3(), _lookPt=new V3();
+let orbitT=0, camShakeT=0, camRigPitch=0, camYaw=Math.PI;
+function updateCamera(dt){
+  if (opts.camMode==='orbit'){
+    orbitT+=dt*0.4;
+    camera.position.set(player.position.x+Math.sin(orbitT)*28,player.position.y+19,player.position.z+Math.cos(orbitT)*28);
+    camBase.copy(camera.position); camYaw=st.yaw;
+    camTarget.lerp(player.position,Math.min(1,dt*8));
+    camera.lookAt(camTarget); return;
+  }
+  // The rig used to be built on st.yaw, so a 540 in the air whipped the camera
+  // round with the body. Yaw no longer steers anything airborne — travel does —
+  // so the camera follows the direction of travel and the player is free to
+  // spin, or to land backwards, without the view moving.
+  camYaw=lerpAngle(camYaw,travelHeading(),Math.min(1,dt*g('camYawRate')));
+  const kmh=vel.length()*KMH;
+  // distance is what actually reads as "closer"; FOV widening is a separate
+  // lever that adds peripheral motion. Each gets its own band.
+  const zoomT=zoomLevel=speedRamp(kmh,'zoomStart','zoomFull','zoomCurve');
+  const offY=lerp(g('camHighSlow'),g('camHighFast'),zoomT),offZ=lerp(g('camFar'),g('camNear'),zoomT);
+  const airPull=st.grounded?0:clamp(st.airTime*2.2,0,1)*3.4;
+  // hitched you sit right against the bodywork; ease out a touch to keep it readable
+  const hitchPull=hitch.car?2.2:0;
+
+  // ---- ramp alignment ----
+  // The rig is built on world axes, so on an incline it aims into the hillside:
+  // at a 30° climb the look direction sits 34.8° into the slope instead of the
+  // 4.8° it holds on the flat. Rotating position AND look target together by
+  // the climb angle reproduces the flat framing exactly, relative to the road.
+  // Measured along the way we're FACING, so reversing down a ramp isn't a climb.
+  const fwdX=Math.sin(camYaw),fwdZ=Math.cos(camYaw);
+  const nrm=st.surfaceNormal;
+  const climb=st.grounded ? Math.atan(-(nrm.x*fwdX+nrm.z*fwdZ)/Math.max(0.05,nrm.y)) : 0;
+  const rigTarget=climb>0 ? Math.min(climb,g('rampAlignMax')*Math.PI/180)*g('rampAlign') : 0;
+  camRigPitch=lerp(camRigPitch,rigTarget,Math.min(1,dt*g('rampAlignRate')));
+  const rc=Math.cos(camRigPitch),rs=Math.sin(camRigPitch);
+  const tgX=fwdX*rc, tgY=rs,  tgZ=fwdZ*rc;   // slope tangent
+  const nmX=-fwdX*rs, nmY=rc, nmZ=-fwdZ*rs;  // slope normal
+
+  const backDist=offZ+airPull+hitchPull, upDist=offY+airPull*0.55+hitchPull*0.2;
+  const desired=new V3(
+    player.position.x-tgX*backDist+nmX*upDist,
+    player.position.y-tgY*backDist+nmY*upDist,
+    player.position.z-tgZ*backDist+nmZ*upDist);
+
+  // A fixed-rate follow trails its target by roughly v/k at constant speed.
+  // At 150 km/h with k=6 that was ~8 units — more than the whole pull-in, so
+  // measured distance stayed near 10 at every speed and the zoom never landed.
+  // The exact lag for a discrete lerp is v*dt*(1-a)/a, not the continuous v/k;
+  // using the latter over-compensates by 30% at k=14 and pulls in too far.
+  camTargetDist=offZ+airPull+hitchPull;
+  const follow=g('camFollow');
+  const a=Math.min(1,dt*follow);
+  const lead=a>1e-4 ? dt*(1-a)/a : 0;
+  desired.addScaledVector(vel,g('camLagComp')*lead);
+
+  const behind=sampleGround(desired.x,desired.z,desired.y);
+  if (behind.y!==-Infinity&&desired.y<behind.y+2.2) desired.y=behind.y+2.2;
+
+  // shake rides on top of a clean base position, or the smoothing would chase
+  // its own jitter and the rumble would compound
+  camBase.lerp(desired,Math.min(1,dt*follow));
+  camera.position.copy(camBase);
+  // Shake runs on its own curve, fully independent of the streak ramp. One
+  // continuous power function rather than a blend of two terms — the old
+  // version had a flat spot where the quadratic handed over from the baseline.
+  shakeLevel=speedRamp(kmh,'shakeStart','shakeWild','shakeCurve');
+  const shake=g('camShake')*shakeLevel;
+  if (shake>0.0005){
+    // frequency climbs with the ramp too — the same amplitude reads calmer slow
+    camShakeT+=dt*(1+shakeLevel*0.9);
+    camera.position.x+=Math.sin(camShakeT*37.0)*shake;
+    camera.position.y+=Math.sin(camShakeT*23.7+1.3)*shake;
+    camera.position.z+=Math.sin(camShakeT*31.1+2.6)*shake;
+  }
+  // FOV widening is the cheapest sense-of-speed there is
+  fovLevel=speedRamp(kmh,'fovStart','fovFull','fovCurve');
+  const targetFov=BASE_FOV+g('fovKick')*fovLevel;
+  if (Math.abs(camera.fov-targetFov)>0.02){ camera.fov=targetFov; camera.updateProjectionMatrix(); }
+
+  // Hard floor on horizontal separation. Zoom curve, lag compensation and
+  // shake all push on the camera independently, so the guarantee belongs here
+  // rather than in any one of their tunings.
+  const cdx=camera.position.x-player.position.x, cdz=camera.position.z-player.position.z;
+  const chd=Math.hypot(cdx,cdz);
+  if (chd<g('camMinDist')&&chd>1e-4){
+    const s=g('camMinDist')/chd;
+    camera.position.x=player.position.x+cdx*s;
+    camera.position.z=player.position.z+cdz*s;
+  }
+
+  // The look target was pinned to the player's chest at every zoom level, so
+  // closing in just made the player fill more of a frame still centred on them.
+  // Raising it and pushing it forward tilts the camera up: the player settles
+  // into the lower frame and the road ahead takes the middle.
+  const lookH=lerp(g('lookHighSlow'),g('lookHighFast'),zoomT);
+  const lookF=g('lookAheadFast')*zoomT;
+  _lookPt.set(
+    player.position.x+tgX*lookF+nmX*lookH,
+    player.position.y+tgY*lookF+nmY*lookH,
+    player.position.z+tgZ*lookF+nmZ*lookH);
+  camTarget.lerp(_lookPt,Math.min(1,dt*10));
+  camera.lookAt(camTarget);
+}
+
+// ===================================================================
+// HUD
+// ===================================================================
+const el=id=>document.getElementById(id);
+let msSmoothed=16;
+function updateHUD(frameMs){
+  const sp=vel.length();
+  el('spd').textContent=Math.round(sp*3.2);
+  el('d-sp').textContent=sp.toFixed(1);
+  el('d-vy').textContent=vel.y.toFixed(1);
+  el('d-vy').className='v '+(vel.y>0.5?'good':vel.y<-12?'bad':'');
+  el('d-state').textContent=st.grinding?(Math.abs(st.grindStance)>0.1&&Math.abs(st.grindStance)<3?'BOARDSLIDE':'50-50'):st.drifting?'DRIFTING':st.braking?'TAIL STRAFE':st.footBrake?'BRAKING':hitch.car?'HITCHED':st.grounded?'GROUNDED':'AIRBORNE';
+  el('d-state').className='v '+(st.grinding?'good':st.tailDrag?'warn':hitch.car?'good':st.grounded?'':'warn');
+  el('d-surf').textContent=st.surfaceId;
+  el('d-surf').className='v '+(st.surfaceId==='road'?'':st.surfaceId==='void'?'bad':'good');
+
+  if (hitch.car){
+    el('d-hitch').textContent=hitch.car.type.name;
+    el('d-hitch').className='v good';
+    el('d-peri').textContent=hitch.face+' · '+hitch.u.toFixed(1)+' / '+hitchPerimeter(hitch.car).toFixed(1);
+    el('d-peri').className='v good';
+  } else {
+    el('d-hitch').textContent='—'; el('d-hitch').className='v';
+    el('d-peri').textContent='—'; el('d-peri').className='v';
+  }
+  const bar=document.getElementById('matchFill');
+  if (hitch.car){
+    el('d-near').textContent='—'; el('d-near').className='v';
+    el('d-match').textContent='—'; el('d-match').className='v';
+    bar.style.width='100%'; bar.style.background='#00ffe1';
+  } else {
+    const n=hitch.nearest;
+    if (n){
+      const inReach=n.dist<=g('hitchReach'), relKmh=n.relSp*KMH;
+      const inSpeed=relKmh<=g('hitchSpeedWin');
+      el('d-near').textContent=n.car.type.name;
+      el('d-near').className='v '+(inReach?'good':'');
+      el('d-match').textContent=n.dist.toFixed(1)+' m · '+Math.round(relKmh)+' km/h';
+      el('d-match').className='v '+(inReach&&inSpeed?'good':inReach||inSpeed?'warn':'bad');
+      // bar fills as your relative speed drops toward the window
+      bar.style.width=(clamp(1-relKmh/Math.max(1,g('hitchSpeedWin')*2),0,1)*100).toFixed(0)+'%';
+      bar.style.background=inSpeed?(inReach?'#00ffe1':'#ffe14d'):'#ff3f6f';
+    } else {
+      el('d-near').textContent='—'; el('d-near').className='v';
+      el('d-match').textContent='—'; el('d-match').className='v';
+      bar.style.width='0%';
+    }
+  }
+  const cue=document.getElementById('hitchCue');
+  cue.classList.toggle('show', !!hitch.candidate);
+  if (hitch.candidate) cue.textContent='PRESS F — '+hitch.candidate.car.type.name;
+
+  if (st.lastContact){
+    const kind=st.lastContact.kind;
+    el('d-contact').textContent=kind+' '+st.lastContact.angle.toFixed(0)+'°';
+    el('d-contact').className='v '+(kind==='hit'?'bad':kind==='bump'?'warn':'good');
+    el('d-kept').textContent=(st.lastContact.kept*100).toFixed(0)+'%';
+    el('d-kept').className='v '+(st.lastContact.kept>0.9?'good':st.lastContact.kept>0.7?'warn':'bad');
+  }
+  el('d-air').textContent=st.airTime.toFixed(2)+' s';
+  if (st.grounded){
+    const so=Math.abs(wrapAngle(travelHeading()-st.yaw))*180/Math.PI;
+    el('d-rot').textContent=so>20?'SWITCH '+so.toFixed(0)+'\u00b0 (C)':'\u2014';
+    el('d-rot').className='v '+(so>100?'bad':so>20?'warn':'');
+  }
+  else {
+    const fd=st.flip*180/Math.PI, sd=st.spinTotal*180/Math.PI;
+    const off=Math.abs(st.flip-Math.round(st.flip/(Math.PI*2))*(Math.PI*2));
+    const wantF=(keys['KeyW']||keys['KeyS'])&&!harp.attached&&!hitch.car;
+    const low=wantF&&!st.flipArmed&&!st.fromRailPop;
+    const railLock=wantF&&st.fromRailPop;
+    el('d-rot').textContent=railLock?'NO FLIP OFF RAIL':low?'TOO LOW TO FLIP':fd.toFixed(0)+'\u00b0 / '+sd.toFixed(0)+'\u00b0';
+    el('d-rot').className='v '+((low||railLock)?'warn':off>g('flipLandTol')?'bad':'good');
+  }
+  if (st.lastImpact){
+    el('d-imp').textContent=st.lastImpact.angle.toFixed(0)+'° −'+st.lastImpact.lost.toFixed(1);
+    el('d-imp').className='v '+(st.lastImpact.angle<22?'good':st.lastImpact.angle<45?'warn':'bad');
+  }
+  if (harp.attached){
+    el('d-teth').textContent=(harp.taut?'TAUT':'slack')+' · '+(harp.anchorType==='static'?'ANCHOR':harp.car.type.name);
+    el('d-teth').className='v '+(harp.taut?'good':'warn');
+    el('d-rope').textContent=harp.anchorType==='static'
+      ? harp.ropeLen.toFixed(1)+' / cap '+harp.lenCap.toFixed(1)
+      : harp.ropeLen.toFixed(1)+' / '+harp.liveLen.toFixed(1);
+    el('d-wrap').textContent=harp.pivots.length;
+    el('d-wrap').className='v '+(harp.pivots.length?'good':'');
+    el('d-swing').textContent=harp.swing.toFixed(1);
+    el('d-swing').className='v '+(harp.swing>8?'good':'');
+  } else {
+    el('d-teth').textContent='—'; el('d-teth').className='v';
+    el('d-rope').textContent='—'; el('d-wrap').textContent='0'; el('d-wrap').className='v';
+    el('d-swing').textContent='—'; el('d-swing').className='v';
+  }
+  el('d-q').textContent=surfaceQueryCount+' surf / '+pathQueryCount+' path';
+  el('d-fx').textContent=Math.round(streakIntensity*100)+'% · shake '+Math.round(shakeLevel*100)+'%';
+  el('d-fx').className='v '+(streakIntensity>0.5?'good':streakIntensity>0.05?'warn':'');
+  const camDist=camera.position.distanceTo(player.position);
+  el('d-cam').textContent=camDist.toFixed(1)+' / '+camTargetDist.toFixed(1)+' · '+camera.fov.toFixed(0)+'°';
+  el('d-cam').className='v '+(camDist<camTargetDist*1.35?'good':'bad');
+  msSmoothed=msSmoothed*0.9+frameMs*0.1;
+  el('d-ms').textContent=msSmoothed.toFixed(1)+' ms';
+  if (!harp.attached&&!harp.firing&&!hitch.car){
+    crosshairEl.classList.remove('hidden');
+    crosshairEl.classList.toggle('lock',!!getHoveredTarget());
+  } else {
+    crosshairEl.classList.add('hidden');
+    crosshairEl.classList.remove('lock');
+  }
+}
+
+// ===================================================================
+// BOOT
+// ===================================================================
+pathPoints.push({s:0,x:0,y:0,z:0,heading:Math.PI,pitch:0});
+ensurePathGenerated(LOOKAHEAD+260);
+buildFixtures();
+maybeSpawnTowers(LOOKAHEAD);
+maybeSpawnOverpasses(LOOKAHEAD);
+finalizePendingRails();
+rebuildRoadMeshes();
+respawn(true);
+syncToggles();
+buildTuneRows();
+updateCamera(1);          // snap the rig to the opening pose rather than easing in
+
+let last=performance.now();
+// The world holds still behind the start screen. Without this the tow car
+// simply drives off while the text is being read, and DROP IN would land you
+// somewhere down the course with no idea how you got there.
+let started=false;
+document.getElementById('go').addEventListener('click',()=>{
+  document.getElementById('start').style.display='none';
+  last=performance.now();   // don't hand the first frame the whole reading time
+  started=true;
+});
+
+let prevBoundsOpt=false,prevSolidCount=0;
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  const dt=Math.min((now-last)/1000,0.05);
+  last=now;
+  surfaceQueryCount=0; pathQueryCount=0;
+  if (!started){ renderer.render(scene,camera); updateHUD(performance.now()-now); return; }
+
+  ensurePathGenerated(st.pathS+LOOKAHEAD);
+  maybeSpawnTowers(st.pathS+LOOKAHEAD);
+  maybeSpawnOverpasses(st.pathS+LOOKAHEAD);
+  finalizePendingRails();
+  trimPath(st.pathS-BEHIND_TRIM);
+  cleanupTowers(st.pathS-BEHIND_TRIM);
+  cleanupDecor(st.pathS-BEHIND_TRIM);
+  cleanupRails(st.pathS-BEHIND_TRIM);
+  if (pathDirty) rebuildRoadMeshes();
+
+  updateTraffic(dt);
+  updatePlayer(dt);
+  updateHarpoonVisuals(dt);
+  updateHeat(dt);
+  updateSparks(dt);
+  updateStreaks(dt);
+  updateTrail();
+  updatePrediction();
+  updateProbeGrid();
+  updateCarHulls();
+
+  if (opts.bounds!==prevBoundsOpt||(opts.bounds&&solids.length!==prevSolidCount)){
+    rebuildBounds(); prevBoundsOpt=opts.bounds; prevSolidCount=solids.length;
+  }
+  boundsGroup.visible=opts.bounds;
+
+  updateCamera(dt);
+  renderer.render(scene,camera);
+  updateHUD(performance.now()-now);
+}
+animate();
+
+})();
+</script>
+</body>
+</html>
